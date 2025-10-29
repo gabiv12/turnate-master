@@ -1,141 +1,77 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+# app/routers/usuarios.py
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
-from typing import Optional
-
 from app.database import get_db
 from app import models
-
-# Import flexible: usa core.security si existe; sino app.security
-try:
-    from app.core.security import get_password_hash, verify_password, create_access_token
-except Exception:  # pragma: no cover
-    from app.security import get_password_hash, verify_password, create_access_token  # type: ignore
+from app.auth import get_current_user, verify_password, get_password_hash
 
 router = APIRouter(prefix="/usuarios", tags=["usuarios"])
 
-# --------- helpers ---------
-def _get_user_by_email_or_username(db: Session, email: Optional[str], username: Optional[str]) -> Optional[models.Usuario]:
-    q = db.query(models.Usuario)
-    if email:
-        u = q.filter(models.Usuario.email == email).first()
-        if u:
-            return u
-    if username:
-        u = db.query(models.Usuario).filter(models.Usuario.username == username).first()
-        if u:
-            return u
-    return None
-
-def _user_to_dict(u: models.Usuario) -> dict:
-    """No exponemos el hash. Hacemos salida que el front entiende."""
-    d = {
-        "id": getattr(u, "id", None),
-        "username": getattr(u, "username", None),
-        "email": getattr(u, "email", None),
-        "rol": getattr(u, "rol", None) or getattr(u, "role", None) or "cliente",
+@router.get("/me")
+def get_me(db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
+    # devolvés solo los campos públicos
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "nombre": getattr(user, "nombre", None),
+        "apellido": getattr(user, "apellido", None),
+        "dni": getattr(user, "dni", None),
+        "avatar_url": getattr(user, "avatar_url", None),
     }
-    # Mantener compatibilidad con claves antiguas
-    return d
 
-def _set_password(u: models.Usuario, raw_password: str):
-    h = get_password_hash(raw_password)
-    # tolerante al nombre del campo
-    if hasattr(u, "hashed_password"):
-        setattr(u, "hashed_password", h)
-    elif hasattr(u, "password_hash"):
-        setattr(u, "password_hash", h)
-    else:
-        # último recurso: campo 'password' en BD (no recomendado, pero común)
-        setattr(u, "password", h)
-
-def _get_password_hash_value(u: models.Usuario) -> Optional[str]:
-    for attr in ("hashed_password", "password_hash", "password"):
-        if hasattr(u, attr):
-            return getattr(u, attr)
-    return None
-
-# --------- endpoints ---------
-
-@router.post("/login")
-def login(payload: dict, db: Session = Depends(get_db)):
-    """
-    Acepta:
-      { "email": "...", "password": "..." }  ó  { "username": "...", "password": "..." }
-    Devuelve:
-      { "user": {...}, "token": "..." }  (y además "user_schema" por compatibilidad)
-    """
-    email = (payload.get("email") or "").strip() or None
-    username = (payload.get("username") or "").strip() or None
-    password = payload.get("password") or ""
-
-    if not (email or username) or not password:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Email/usuario y contraseña son obligatorios")
-
-    u = _get_user_by_email_or_username(db, email, username)
-    if not u:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Usuario no encontrado")
-
-    stored = _get_password_hash_value(u)
-    if not stored or not verify_password(password, stored):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Credenciales incorrectas")
-
-    token = create_access_token({"sub": str(getattr(u, "id", ""))})
-    user_out = _user_to_dict(u)
-
-    return {"user": user_out, "user_schema": user_out, "token": token}
-
-
-@router.post("/", status_code=status.HTTP_201_CREATED)
-def registrar(payload: dict, db: Session = Depends(get_db)):
-    """
-    Acepta:
-      { "username": "...", "email": "...", "password": "..." }
-    Devuelve:
-      { "user": {...} }
-    """
+@router.put("/me")
+def update_me(payload: dict, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
+    # Campos permitidos
     username = (payload.get("username") or "").strip()
     email = (payload.get("email") or "").strip()
-    password = payload.get("password") or ""
 
-    if not username or not email or not password:
-        raise HTTPException(status_code=400, detail="username, email y password son obligatorios")
+    if not username or not email:
+        raise HTTPException(status_code=422, detail="Usuario y email son obligatorios.")
 
-    # Verificar duplicados
-    if db.query(models.Usuario).filter(models.Usuario.username == username).first():
-        raise HTTPException(status_code=400, detail="El usuario ya existe")
-    if db.query(models.Usuario).filter(models.Usuario.email == email).first():
-        raise HTTPException(status_code=400, detail="El email ya existe")
+    # Únicos si aplica en tu modelo
+    exists_u = db.query(models.Usuario).filter(models.Usuario.username == username, models.Usuario.id != user.id).first()
+    if exists_u:
+        raise HTTPException(status_code=400, detail="Ese usuario ya está en uso.")
+    exists_e = db.query(models.Usuario).filter(models.Usuario.email == email, models.Usuario.id != user.id).first()
+    if exists_e:
+        raise HTTPException(status_code=400, detail="Ese correo ya está en uso.")
 
-    # Crear usuario
-    u_kwargs = {
-        "username": username,
-        "email": email,
+    user.username  = username
+    user.email     = email
+    # ✅ ahora sí persiste estos campos
+    user.nombre    = (payload.get("nombre") or None)
+    user.apellido  = (payload.get("apellido") or None)
+    user.dni       = (payload.get("dni") or None)
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return {
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "nombre": user.nombre,
+        "apellido": user.apellido,
+        "dni": user.dni,
+        "avatar_url": getattr(user, "avatar_url", None),
     }
-    # rol por defecto si existe campo
-    if hasattr(models.Usuario, "rol"):
-        u_kwargs["rol"] = "cliente"
-    if hasattr(models.Usuario, "role"):
-        u_kwargs["role"] = "cliente"
 
-    u = models.Usuario(**u_kwargs)
-    _set_password(u, password)
+@router.put("/me/password")
+def change_password(body: dict, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
+    old_password = body.get("old_password")
+    new_password = body.get("new_password")
 
-    try:
-        db.add(u)
-        db.commit()
-        db.refresh(u)
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="Usuario o email duplicado")
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="No se pudo registrar el usuario")
+    if not old_password or not new_password:
+        raise HTTPException(status_code=422, detail="Faltan datos de contraseña.")
+    if len(new_password) < 8:
+        raise HTTPException(status_code=422, detail="La nueva contraseña debe tener al menos 8 caracteres.")
 
-    return {"user": _user_to_dict(u)}
+    if not verify_password(old_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta.")
 
-
-# Alias por compatibilidad: /usuarios/registro
-@router.post("/registro", status_code=status.HTTP_201_CREATED)
-def registrar_alias(payload: dict, db: Session = Depends(get_db)):
-    return registrar(payload, db)
+    user.password_hash = get_password_hash(new_password)
+    db.add(user)
+    db.commit()
+    return {"ok": True}

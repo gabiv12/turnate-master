@@ -1,164 +1,148 @@
 // src/pages/Login.jsx
-import React, { useState, useContext } from "react";
-import { UserContext } from "../context/UserContext.jsx";
-import api, { setToken, readToken } from "../components/api";
+import React, { useState, useRef, useEffect, useContext } from "react";
 import Button from "../components/Button";
 import Input from "../components/Input";
+import api, { loginAuth } from "../services/api"; // << usa services/api (no components/api)
+import { UserContext } from "../context/UserContext.jsx";
 
 const LOGO_SRC = "/images/TurnateLogo.png";
 
-/* Modal simple sin dependencias externas (todo en este archivo) */
-function SimpleModal({ open, title, onClose, children }) {
-  if (!open) return null;
+/* Overlay de estado (loading / success) */
+function FullscreenStatus({ variant, title, caption, ctaLabel, onCta }) {
   return (
-    <div className="fixed inset-0 z-[60]">
-      <div className="absolute inset-0 bg-slate-900/50" onClick={onClose} />
-      <div className="absolute inset-0 grid place-items-center p-4">
-        <div className="w-full max-w-md rounded-2xl bg-white shadow-xl ring-1 ring-slate-200">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-            <h3 className="text-slate-800 font-semibold">{title}</h3>
-            <button
-              onClick={onClose}
-              className="rounded-lg px-2 py-1 text-sm text-slate-600 hover:bg-slate-100"
-              aria-label="Cerrar"
-            >
-              ✕
-            </button>
-          </div>
-          <div className="p-5">{children}</div>
+    <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/60 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 p-6 text-center">
+        <div className="mx-auto mb-4 h-14 w-14 grid place-items-center rounded-full bg-slate-100">
+          {variant === "loading" ? (
+            <svg className="h-7 w-7 animate-spin" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" className="opacity-20" />
+              <path d="M21 12a9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="2" className="opacity-80" />
+            </svg>
+          ) : (
+            <svg className="h-7 w-7 text-emerald-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M20 6 9 17l-5-5" />
+            </svg>
+          )}
         </div>
+        <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+        {caption && <p className="mt-1 text-sm text-slate-600">{caption}</p>}
+        {ctaLabel && (
+          <button
+            className="mt-4 inline-flex items-center justify-center rounded-xl bg-gradient-to-r from-blue-600 to-cyan-400 px-4 py-2.5 text-sm font-semibold text-white shadow hover:scale-[1.01] active:scale-95"
+            onClick={onCta}
+          >
+            {ctaLabel}
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
-export default function Login() {
-  const ctx = useContext(UserContext) || {};
-  const { loginCtx, setUser } = ctx;
+function extractBackendMessage(err) {
+  const d = err?.response?.data;
+  if (typeof d === "string") return d;
+  if (d?.detail) {
+    if (typeof d.detail === "string") return d.detail;
+    if (Array.isArray(d.detail)) {
+      const msgs = d.detail.map(it => it?.msg || it?.message).filter(Boolean);
+      if (msgs.length) return msgs.join(" • ");
+      return "Hubo un problema con los datos enviados.";
+    }
+  }
+  return d?.message || d?.error || err?.message || "No se pudo iniciar sesión.";
+}
 
-  const [emailOrUser, setEmailOrUser] = useState("");
+export default function Login() {
+  const { setUser } = useContext(UserContext) || {};
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+
   const [loading, setLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
+  const [redirectIn, setRedirectIn] = useState(2);
   const [msg, setMsg] = useState("");
 
-  // Modal "Olvidé mi contraseña" (sin tocar otros archivos)
-  const [forgotOpen, setForgotOpen] = useState(false);
-  const [forgotEmail, setForgotEmail] = useState("");
-  const [forgotSending, setForgotSending] = useState(false);
+  const timerRef = useRef(null);
+  const intervalRef = useRef(null);
+  const abortRef = useRef(null);
 
-  // --- Login fallback directo a API (si no hay loginCtx en el contexto)
-  const doLoginFallback = async () => {
-    const hasAt = emailOrUser.includes("@");
-    const payload = hasAt ? { email: emailOrUser, password } : { username: emailOrUser, password };
-
-    // Intento #1
-    try {
-      const res = await api.post("/usuarios/login", payload);
-      const token = res?.data?.token || res?.data?.access_token || res?.data?.jwt;
-      const u = res?.data?.user || res?.data?.usuario || res?.data?.user_schema || res?.data;
-      if (!token || !u) throw new Error("Respuesta de login incompleta");
-      setToken(token);
-      if (setUser) setUser(u);
-      localStorage.setItem("user", JSON.stringify(u));
-      return { user: u, token };
-    } catch (err1) {
-      // Intento #2
-      try {
-        const res = await api.post("/auth/login", payload);
-        const token = res?.data?.token || res?.data?.access_token || res?.data?.jwt;
-        const u = res?.data?.user || res?.data?.usuario || res?.data;
-        if (!token || !u) throw new Error("Respuesta de login incompleta");
-        setToken(token);
-        if (setUser) setUser(u);
-        localStorage.setItem("user", JSON.stringify(u));
-        return { user: u, token };
-      } catch (err2) {
-        const d = err2?.response?.data || err1?.response?.data;
-        const m = d?.detail || d?.message || "No se pudo iniciar sesión";
-        throw new Error(m);
-      }
-    }
-  };
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
 
   const handleLogin = async (e) => {
     e.preventDefault();
     setMsg("");
+    if (loading) return;
+
+    const u = username.trim();
+    if (!u || !password.trim()) {
+      setMsg("⚠️ Completá tu usuario y contraseña.");
+      return;
+    }
+
     setLoading(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      let u = null;
-      let tok = null;
+      // 1) /auth/login (form-urlencoded) -> guarda token (services/api)
+      await loginAuth(u, password);
 
-      if (typeof loginCtx === "function") {
-        const hasAt = emailOrUser.includes("@");
-        const result = await loginCtx(
-          hasAt ? { email: emailOrUser, password } : { username: emailOrUser, password }
-        );
-        tok = result?.token || readToken();
-        if (tok) setToken(tok);
-        u = result?.user || result || null;
-        if (u) {
-          localStorage.setItem("user", JSON.stringify(u));
-          if (setUser) setUser(u);
-        }
-      } else {
-        const r = await doLoginFallback();
-        u = r.user;
-        tok = r.token;
-      }
+      // 2) Obtenemos datos del emprendedor (ya con token via interceptor)
+      const me = await api.get("/emprendedores/mi", { signal: controller.signal });
+      const emp = me?.data;
+      if (!emp) throw new Error("No pudimos obtener tus datos.");
 
-      setMsg("✅ Sesión iniciada");
-      setTimeout(() => {
-        const dest = u?.rol === "emprendedor" ? "/turnos" : "/reservar";
-        window.location.assign(dest);
-      }, 300);
+      // 3) Construimos el usuario de la app con rol emprendedor para el navbar
+      const appUser = {
+        ...emp,                // id, user_id, codigo_cliente, etc.
+        rol: "emprendedor",    // <- clave para que el navbar te muestre como dueño
+        isOwner: true,
+      };
+      setUser?.(appUser);
+      localStorage.setItem("user", JSON.stringify(appUser));
+
+      // 4) Éxito + redirección
+      setSuccess(true);
+      setRedirectIn(2);
+      intervalRef.current = setInterval(() => {
+        setRedirectIn((s) => (s > 1 ? s - 1 : s));
+      }, 1000);
+      timerRef.current = setTimeout(() => {
+        window.location.assign("/turnos");
+      }, 2000);
     } catch (err) {
-      setMsg(`⚠️ ${err.message || "Error al iniciar sesión"}`);
+      const m = extractBackendMessage(err);
+      setMsg(/401|not authenticated|credentials|invalid/i.test(m)
+        ? "No pudimos validar tu sesión. Revisá usuario/contraseña."
+        : `⚠️ ${m}`);
     } finally {
       setLoading(false);
-    }
-  };
-
-  // Envío "Olvidé mi contraseña" SIN tocar otros archivos: probamos endpoints comunes
-  const handleForgot = async (e) => {
-    e.preventDefault();
-    if (!forgotEmail) return;
-    setForgotSending(true);
-    setMsg("");
-    try {
-      const payload = { email: forgotEmail };
-      const endpoints = [
-        "/usuarios/recuperar",
-        "/auth/forgot",
-        "/usuarios/forgot",
-        "/auth/password/forgot",
-      ];
-      let ok = false;
-      let serverMsg = null;
-      for (const p of endpoints) {
-        try {
-          const r = await api.post(p, payload);
-          ok = true;
-          serverMsg = r?.data?.detail || r?.data?.message || null;
-          break;
-        } catch (_) {}
-      }
-      if (!ok) throw new Error("No se pudo iniciar el proceso. Probá más tarde.");
-      setMsg(serverMsg || "📬 Si el email existe, te enviamos instrucciones.");
-      setForgotOpen(false);
-      setForgotEmail("");
-    } catch (err) {
-      setMsg(`⚠️ ${err.message || "No se pudo enviar el email"}`);
-    } finally {
-      setForgotSending(false);
+      abortRef.current = null;
     }
   };
 
   return (
     <div className="pt-24">
-      {/* Wrapper para centrar el card y empujar el footer al fondo */}
+      {loading && <FullscreenStatus variant="loading" title="Ingresando…" caption="Estamos validando tus datos." />}
+      {success && (
+        <FullscreenStatus
+          variant="success"
+          title="¡Bienvenido/a!"
+          caption={`Vas a ser redirigido en ${redirectIn}…`}
+          ctaLabel="Ir ahora"
+          onCta={() => window.location.assign("/turnos")}
+        />
+      )}
+
       <div className="min-h-[calc(100vh-240px)] flex items-center justify-center px-4">
         <div className="w-full max-w-md rounded-2xl border border-gray-200 bg-white/95 shadow-lg backdrop-blur">
-          {/* Cabecera del formulario con logo + marca */}
           <div className="px-6 pt-6 text-center">
             <div className="inline-flex items-center gap-3 select-none">
               <img
@@ -173,29 +157,33 @@ export default function Login() {
               </span>
             </div>
             <h1 className="mt-3 text-xl font-semibold text-slate-800">Iniciar sesión</h1>
-            <p className="text-sm text-slate-500">Accedé a tu cuenta para gestionar tus turnos.</p>
+            <p className="text-sm text-slate-500">Usá tu <strong>usuario</strong> y contraseña.</p>
           </div>
 
           <div className="p-6">
             {msg && (
               <div
                 className={`mb-4 rounded-lg px-3 py-2 text-sm ${
-                  /⚠️|Error|No se pudo|incorrect/i.test(msg)
+                  /⚠️|No pudimos|No se pudo|Revisá/i.test(msg)
                     ? "bg-red-50 text-red-700 ring-1 ring-red-200"
                     : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
                 }`}
+                role="status"
+                aria-live="polite"
               >
                 {msg}
               </div>
             )}
 
-            <form onSubmit={handleLogin} className="grid gap-3">
+            <form onSubmit={handleLogin} className="grid gap-3" noValidate aria-busy={loading}>
               <Input
                 type="text"
-                placeholder="Email o usuario"
-                value={emailOrUser}
-                onChange={(e) => setEmailOrUser(e.target.value)}
+                placeholder="Usuario"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 required
+                disabled={loading}
+                autoComplete="username"
                 className="rounded-xl bg-white/80"
               />
               <Input
@@ -204,72 +192,29 @@ export default function Login() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
+                disabled={loading}
+                autoComplete="current-password"
                 className="rounded-xl bg-white/80"
               />
-
-              <div className="flex items-center justify-between text-sm">
-                <button
-                  type="button"
-                  onClick={() => setForgotOpen(true)}
-                  className="text-blue-600 hover:underline"
-                >
-                  ¿Olvidaste tu contraseña?
-                </button>
-                {/* Podrías agregar "Recordarme" acá si lo necesitás más adelante */}
-              </div>
 
               <Button
                 type="submit"
                 disabled={loading}
-                className="mt-1 rounded-xl bg-gradient-to-r from-blue-500 to-emerald-400 text-white font-bold py-2 px-4 shadow-lg ring-1 ring-blue-300/40 disabled:opacity-60"
+                className="mt-1 w-full rounded-xl bg-gradient-to-r from-blue-500 to-emerald-400 text-white font-bold py-2 px-4 shadow-lg ring-1 ring-blue-300/40 disabled:opacity-60 disabled:cursor-not-allowed"
               >
                 {loading ? "Ingresando…" : "Ingresar"}
               </Button>
-            </form>
 
-            <div className="mt-4 text-sm text-gray-600 text-center">
-              ¿No tenés cuenta?{" "}
-              <a href="/registro" className="text-blue-600 underline">
-                Registrate
-              </a>
-            </div>
+              <div className="mt-3 text-sm text-gray-600 text-center">
+                ¿No tenés cuenta?{" "}
+                <a href="/registro" className="text-blue-600 underline">
+                  Registrate
+                </a>
+              </div>
+            </form>
           </div>
         </div>
       </div>
-
-      {/* Modal: Olvidé mi contraseña (best-effort, sin tocar otros archivos) */}
-      <SimpleModal open={forgotOpen} title="Recuperar contraseña" onClose={() => setForgotOpen(false)}>
-        <form onSubmit={handleForgot} className="grid gap-3">
-          <Input
-            type="email"
-            placeholder="Tu email"
-            value={forgotEmail}
-            onChange={(e) => setForgotEmail(e.target.value)}
-            required
-            className="rounded-xl bg-white/80"
-          />
-          <div className="flex gap-2">
-            <Button
-              type="submit"
-              disabled={forgotSending}
-              className="rounded-xl bg-blue-600 text-white font-semibold px-4 py-2 disabled:opacity-60"
-            >
-              {forgotSending ? "Enviando…" : "Enviar"}
-            </Button>
-            <button
-              type="button"
-              onClick={() => setForgotOpen(false)}
-              className="rounded-xl border border-slate-300 bg-white text-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-50"
-            >
-              Cancelar
-            </button>
-          </div>
-          <p className="text-xs text-slate-500">
-            Intentaremos los endpoints más comunes de recuperación. Si tu backend
-            no tiene esta ruta, verás un aviso y no se tocará ningún archivo extra.
-          </p>
-        </form>
-      </SimpleModal>
     </div>
   );
 }

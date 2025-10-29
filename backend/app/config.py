@@ -1,46 +1,33 @@
 # app/config.py
-from typing import List
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
 import os
+from pathlib import Path
+from datetime import timedelta
 
-class Settings(BaseSettings):
-    # --- App ---
-    PROJECT_NAME: str = Field(default="Turnate API")
-    API_PREFIX: str = Field(default="")
+# === Paths base ===
+BASE_DIR = Path(__file__).resolve().parent.parent  # carpeta /backend
+DATA_DIR = BASE_DIR / "data"
+UPLOADS_DIR = BASE_DIR / "uploads"
+LOGOS_DIR = UPLOADS_DIR / "logos"
+AVATARS_DIR = UPLOADS_DIR / "avatars"
 
-    # --- Auth / JWT ---
-    SECRET_KEY: str = Field(default_factory=lambda: os.environ.get("SECRET_KEY", "TURNATE_DEV_SECRET_CHANGE_ME"))
-    ALGORITHM: str = Field(default_factory=lambda: os.environ.get("ALGORITHM", "HS256"))
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default_factory=lambda: int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES", "10080")))
+for d in (DATA_DIR, UPLOADS_DIR, LOGOS_DIR, AVATARS_DIR):
+    d.mkdir(parents=True, exist_ok=True)
 
-    # --- DB ---
-    DATABASE_URL: str = Field(default="sqlite:///./basedatos.db")
+# === DB ===
+# Si ya tenés database.db en la raíz del backend, esto lo respeta.
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'database.db'}")
 
-    # --- CORS (como string separado por comas o "*")
-    CORS_ALLOW_ORIGINS: str = Field(default_factory=lambda: os.environ.get("CORS_ALLOW_ORIGINS", "*"))
+# === Auth/JWT ===
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-me")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-settings = Settings()
-
-# ===== Aliases a nivel de módulo (lo que importan otros módulos) =====
-SECRET_KEY: str = settings.SECRET_KEY
-ALGORITHM: str = settings.ALGORITHM
-ACCESS_TOKEN_EXPIRE_MINUTES: int = settings.ACCESS_TOKEN_EXPIRE_MINUTES
-DATABASE_URL: str = settings.DATABASE_URL
-
-# CORS como lista (para CORSMiddleware)
-if settings.CORS_ALLOW_ORIGINS == "*":
-    CORS_ALLOW_ORIGINS_LIST: List[str] = ["*"]
-else:
-    CORS_ALLOW_ORIGINS_LIST: List[str] = [
-        o.strip() for o in settings.CORS_ALLOW_ORIGINS.split(",") if o.strip()
-    ]
-
-# Alias común que suelen usar en main.py
-CORS_ALLOW_ORIGINS: List[str] = CORS_ALLOW_ORIGINS_LIST
+# === CORS (Vite/Local) ===
+CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]

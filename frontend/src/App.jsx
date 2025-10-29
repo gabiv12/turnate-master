@@ -1,3 +1,4 @@
+// src/App.jsx
 import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 
@@ -19,7 +20,8 @@ import IngresarCodigo from "./pages/IngresarCodigo.jsx";
 import Reservar from "./pages/Reservar.jsx";
 
 import Perfil from "./pages/Perfil.jsx";
-import UpdateUserForm from "./pages/UpdateUserForm.jsx";
+// ❌ import UpdateUserForm from "./pages/UpdateUserForm.jsx";  // eliminado
+
 import Turnos from "./pages/Turnos.jsx";
 import Estadisticas from "./pages/Estadisticas.jsx";
 import Suscripcion from "./pages/Suscripcion.jsx";
@@ -53,7 +55,9 @@ export default function App() {
         {/* Autenticadas */}
         <Route element={<ProtectedRoute />}>
           <Route path="/perfil" element={<Perfil />} />
-          <Route path="/update-user" element={<UpdateUserForm />} />
+          {/* compatibilidad: si alguien navega al viejo path, redirige a /perfil */}
+          <Route path="/update-user" element={<Navigate to="/perfil" replace />} />
+
           <Route path="/turnos" element={<Turnos />} />
           <Route path="/estadisticas" element={<Estadisticas />} />
           <Route path="/suscripcion" element={<Suscripcion />} />

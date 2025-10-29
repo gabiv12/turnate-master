@@ -16,6 +16,76 @@ const normSvc = (it = {}) => ({
   precio: Number(it.precio ?? 0) || 0,
 });
 
+// ---- Helpers de compatibilidad de endpoints ----
+async function tryEndpoints(fns) {
+  let lastErr;
+  for (const fn of fns) {
+    try {
+      return await fn();
+    } catch (e) {
+      // Solo seguimos probando si es 404/405 (no existe/no permitido aquí)
+      const st = e?.response?.status;
+      if (st !== 404 && st !== 405) throw e;
+      lastErr = e;
+    }
+  }
+  if (lastErr) throw lastErr;
+}
+
+// Listar servicios (devuelve array)
+async function listServicios() {
+  const r = await tryEndpoints([
+    () => api.get("/servicios/mis"),
+    () => api.get("/mis/servicios"),
+    () => api.get("/emprendedores/mi/servicios"),
+  ]);
+  const data = Array.isArray(r?.data) ? r.data : Array.isArray(r?.data?.items) ? r.data.items : [];
+  return data.map(normSvc);
+}
+
+// Crear servicio
+async function createServicio(payload) {
+  const body = {
+    nombre: payload.nombre,
+    duracion_min: Number(payload.duracion_min),
+    duracion: Number(payload.duracion_min), // compat
+    precio: Number(payload.precio),
+  };
+  await tryEndpoints([
+    () => api.post("/servicios", body),
+    () => api.post("/mis/servicios", body),
+    () => api.post("/emprendedores/mi/servicios", body),
+  ]);
+}
+
+// Actualizar servicio
+async function updateServicio(id, payload) {
+  const body = {
+    nombre: payload.nombre,
+    duracion_min: Number(payload.duracion_min),
+    duracion: Number(payload.duracion_min), // compat
+    precio: Number(payload.precio),
+  };
+  await tryEndpoints([
+    () => api.put(`/servicios/${id}`, body),
+    () => api.put(`/mis/servicios/${id}`, body),
+    () => api.put(`/emprendedores/mi/servicios/${id}`, body),
+    // fallback PATCH si algún router viejo no acepta PUT
+    () => api.patch(`/servicios/${id}`, body),
+    () => api.patch(`/mis/servicios/${id}`, body),
+    () => api.patch(`/emprendedores/mi/servicios/${id}`, body),
+  ]);
+}
+
+// Eliminar servicio
+async function deleteServicio(id) {
+  await tryEndpoints([
+    () => api.delete(`/servicios/${id}`),
+    () => api.delete(`/mis/servicios/${id}`),
+    () => api.delete(`/emprendedores/mi/servicios/${id}`),
+  ]);
+}
+
 export default function Servicios() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -37,8 +107,7 @@ export default function Servicios() {
       setErr("");
       setOk("");
       setLoading(true);
-      const { data } = await api.get("/servicios/mis");
-      const arr = Array.isArray(data) ? data.map(normSvc) : [];
+      const arr = await listServicios();
       setItems(arr);
     } catch (e) {
       setErr(
@@ -87,7 +156,7 @@ export default function Servicios() {
       setSaving(true);
       setErr("");
       setOk("");
-      await api.delete(`/servicios/${svc.id}`);
+      await deleteServicio(svc.id);
       setOk("Servicio eliminado.");
       await load();
     } catch (e) {
@@ -108,24 +177,6 @@ export default function Servicios() {
       return "Ingresá un precio válido (>= 0).";
     return null;
   };
-
-  async function saveCreate(payload) {
-    // crea
-    await api.post("/servicios", payload);
-  }
-  async function saveUpdate(id, payload) {
-    // update con PUT (fallback a PATCH solo por compat si alguien dejó algo viejo)
-    try {
-      await api.put(`/servicios/${id}`, payload);
-    } catch (e) {
-      if (e?.response?.status === 405) {
-        // No debería pasar, pero lo dejamos por si quedó algo en el back
-        await api.patch(`/servicios/${id}`, payload);
-      } else {
-        throw e;
-      }
-    }
-  }
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -149,10 +200,10 @@ export default function Servicios() {
       setErr("");
       setOk("");
       if (editing?.id) {
-        await saveUpdate(editing.id, payload); // ← PUT
+        await updateServicio(editing.id, payload);
         setOk("Servicio actualizado.");
       } else {
-        await saveCreate(payload);
+        await createServicio(payload);
         setOk("Servicio creado.");
       }
       await load();

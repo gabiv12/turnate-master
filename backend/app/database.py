@@ -1,28 +1,19 @@
 # app/database.py
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from app.config import DATABASE_URL
 
-# Puedes setear DATABASE_URL en el entorno.
-# Ejemplos:
-#   sqlite (local): sqlite:///./turnate.db
-#   postgres:       postgresql+psycopg2://user:pass@localhost:5432/turnate
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./turnate.db")
-
-# SQLite necesita este connect_args para threads con Uvicorn --reload en Windows
+connect_args = {}
 if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False}
-    )
-else:
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    # Necesario para SQLite en FastAPI (hilos)
+    connect_args = {"check_same_thread": False}
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = create_engine(DATABASE_URL, echo=False, future=True, connect_args=connect_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
 Base = declarative_base()
 
+# Dependencia FastAPI para inyectar sesión
 def get_db():
-    """Dependencia FastAPI: sesión por request."""
     db = SessionLocal()
     try:
         yield db

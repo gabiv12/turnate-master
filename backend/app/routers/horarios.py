@@ -1,41 +1,44 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+# app/routers/horarios.py
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.routers.deps import get_current_user
 from app import models
-from app.schemas import HorarioCreate, HorarioUpdate, HorarioOut
-from app.crud.horarios import get_horarios, create_horario, update_horario, delete_horario
+from app.auth import get_current_user
 
 router = APIRouter(prefix="/horarios", tags=["horarios"])
 
-def _require_emprendedor(db: Session, user: models.Usuario) -> models.Emprendedor:
-    emp = db.query(models.Emprendedor).filter(models.Emprendedor.usuario_id == user.id).first()
+def _ensure_emp(db: Session, user: models.Usuario) -> models.Emprendedor:
+    # ✅ En tu modelo el FK es user_id (no usuario_id)
+    emp = db.query(models.Emprendedor).filter(models.Emprendedor.user_id == user.id).first()
     if not emp:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo para emprendedores")
+        # Si tu flujo permite autogenerar, podés crearlo acá;
+        # si no, simplemente lanzar 404.
+        raise HTTPException(status_code=404, detail="No tenés un emprendimiento asociado.")
     return emp
 
-@router.get("/mis", response_model=list[HorarioOut])
-def listar_mis_horarios(db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
-    emp = _require_emprendedor(db, user)
-    return get_horarios(db, emp.id)
+@router.get("/mis")
+def mis_horarios(db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
+    emp = _ensure_emp(db, user)
+    horarios = db.query(models.Horario).filter(models.Horario.emprendedor_id == emp.id).all()
+    return horarios
 
-@router.post("", response_model=HorarioOut, status_code=201)
-def crear_mi_horario(payload: HorarioCreate, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
-    emp = _require_emprendedor(db, user)
-    return create_horario(db, emp.id, payload)
-
-@router.put("/{horario_id}", response_model=HorarioOut)
-def actualizar_mi_horario(horario_id: int, payload: HorarioUpdate, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
-    emp = _require_emprendedor(db, user)
-    updated = update_horario(db, horario_id, payload)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Horario no encontrado")
-    return updated
-
-@router.delete("/{horario_id}", status_code=204)
-def eliminar_mi_horario(horario_id: int, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
-    emp = _require_emprendedor(db, user)
-    ok = delete_horario(db, horario_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Horario no encontrado")
-    return None
+@router.post("")
+def crear_horario(payload: dict, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
+    emp = _ensure_emp(db, user)
+    # Ajustá a tu schema real:
+    # payload esperado: { "dia": int, "desde": "HH:MM", "hasta": "HH:MM", "intervalo": int }
+    try:
+        h = models.Horario(
+            emprendedor_id=emp.id,
+            dia=payload.get("dia"),
+            desde=payload.get("desde"),
+            hasta=payload.get("hasta"),
+            intervalo=payload.get("intervalo"),
+        )
+        db.add(h)
+        db.commit()
+        db.refresh(h)
+        return h
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=422, detail="Datos inválidos para crear horario.")

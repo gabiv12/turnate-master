@@ -1,149 +1,89 @@
 # app/routers/emprendedores.py
-from fastapi import APIRouter, Depends, HTTPException, status, Body
+from pathlib import Path
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
+
 from app.database import get_db
-from app.deps import get_current_user
 from app import models
-from sqlalchemy import func, or_
+from app.auth import get_current_user
+from app.schemas import EmprendedorOut, EmprendedorUpdate
+from app.config import UPLOADS_DIR
 
-router = APIRouter(prefix="/emprendedores", tags=["Emprendedores"])
+router = APIRouter(prefix="/emprendedores", tags=["emprendedores"])
 
-def _generate_unique_code(db: Session) -> str:
-    import random, string
-    while True:
-        code = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-        Emp = models.Emprendedor
-        # Detecta la columna de código disponible
-        code_col = getattr(Emp, "codigo_cliente", None) or getattr(Emp, "codigo", None) or getattr(Emp, "code", None)
-        if code_col is None:
-            return code  # si tu tabla no tiene columna de código, igual devolvemos uno
-        exists = db.query(Emp).filter(code_col == code).first()
-        if not exists:
-            return code
+def _ensure_emp_for_user(db: Session, user: models.Usuario) -> models.Emprendedor:
+    emp = db.query(models.Emprendedor).filter(models.Emprendedor.user_id == user.id).first()
+    if not emp and hasattr(models.Emprendedor, "usuario_id"):
+        emp = db.query(models.Emprendedor).filter(models.Emprendedor.usuario_id == user.id).first()
 
-def _serialize_emp(e) -> dict:
-    def g(name, default=""):
-        val = getattr(e, name, None)
-        return default if val is None else val
-    return {
-        "id": g("id", None),
-        "usuario_id": g("usuario_id", None),
-        "codigo_cliente": g("codigo_cliente") or g("codigo") or g("code"),
-        "nombre": g("nombre"),
-        "nombre_negocio": g("nombre_negocio"),
-        "telefono_contacto": g("telefono_contacto"),
-        "direccion": g("direccion"),
-        "descripcion": g("descripcion"),
-        "whatsapp": g("whatsapp"),
-        "instagram": g("instagram"),
-        "facebook": g("facebook"),
-        "web": g("web"),
-        "logo_url": g("logo_url"),
-        "banner_url": g("banner_url"),
-    }
-
-@router.get("/mi")
-def mi_emprendimiento(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    Emp = models.Emprendedor
-    e = db.query(Emp).filter(Emp.usuario_id == user.id).first()
-    if not e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No sos emprendedor")
-    return _serialize_emp(e)
-
-@router.put("/mi")
-def actualizar_mi_emprendimiento(
-    datos: dict = Body(...),
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    Emp = models.Emprendedor
-    e = db.query(Emp).filter(Emp.usuario_id == user.id).first()
-    if not e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No sos emprendedor")
-
-    allowed = {c.name for c in Emp.__table__.columns}
-    for k, v in (datos or {}).items():
-        if k in allowed:
-            setattr(e, k, v)
-
-    db.add(e)
-    db.commit()
-    db.refresh(e)
-    return _serialize_emp(e)
-
-@router.post("/activar")
-def activar_emprendedor(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    Emp = models.Emprendedor
-
-    # Si ya existe, devolvémoslo
-    existente = db.query(Emp).filter(Emp.usuario_id == user.id).first()
-    if existente:
-        return {
-            "detail": "Ya eras emprendedor",
-            "emprendedor": _serialize_emp(existente),
-        }
-
-    # Crear nuevo emprendedor con solo columnas válidas
-    allowed = {c.name for c in Emp.__table__.columns}
-    data = {"usuario_id": user.id}
-
-    # Código público si tenés columna
-    code = _generate_unique_code(db)
-    if "codigo_cliente" in allowed:
-        data["codigo_cliente"] = code
-    elif "codigo" in allowed:
-        data["codigo"] = code
-    elif "code" in allowed:
-        data["code"] = code
-
-    # Inicializamos algunos campos si existen (evita Nones)
-    for field in (
-        "nombre", "nombre_negocio", "telefono_contacto", "direccion",
-        "descripcion", "whatsapp", "instagram", "facebook", "web",
-        "logo_url", "banner_url"
-    ):
-        if field in allowed and field not in data:
-            data[field] = ""
-
-    e = Emp(**data)  # type: ignore[arg-type]
-    db.add(e)
-
-    # (Opcional) marcar rol de usuario si existe la columna
-    try:
-        if hasattr(user, "rol"):
-            user.rol = "emprendedor"
-            db.add(user)
-    except Exception:
-        pass
-
-    db.commit()
-    db.refresh(e)
-
-    return {
-        "detail": "Emprendedor activado",
-        "emprendedor": _serialize_emp(e),
-    }
-
-# ===========================
-# NUEVO: buscar por código (case/space-insensitive y soporta codigo_cliente/codigo/code)
-# ===========================
-@router.get("/by-codigo/{codigo}")
-def get_by_codigo(codigo: str, db: Session = Depends(get_db)):
-    Emp = models.Emprendedor
-    code = codigo.strip().upper()
-
-    conds = []
-    for attr in ("codigo_cliente", "codigo", "code"):
-        col = getattr(Emp, attr, None)
-        if col is not None:
-            conds.append(func.upper(func.trim(col)) == code)
-
-    if not conds:
-        # No hay columna de código en el modelo
-        raise HTTPException(status_code=404, detail="Emprendedor no encontrado")
-
-    emp = db.query(Emp).filter(or_(*conds)).first()
     if not emp:
-        raise HTTPException(status_code=404, detail="Emprendedor no encontrado")
+        # Crear básico si no existe (compat con tu flujo)
+        emp = models.Emprendedor(
+            user_id=getattr(user, "id"),  # si tu modelo usa usuario_id, el flush lo mapea
+            nombre=user.username,
+        )
+        # mapear también usuario_id si existe la columna
+        if hasattr(models.Emprendedor, "usuario_id"):
+            emp.usuario_id = user.id
+        db.add(emp)
+        db.commit()
+        db.refresh(emp)
+    return emp
 
-    return _serialize_emp(emp)
+def _to_out(emp: models.Emprendedor) -> EmprendedorOut:
+    # rellenar alias de compat
+    data = EmprendedorOut.model_validate(emp)
+    if data.usuario_id is None:
+        data.usuario_id = data.user_id
+    return data
+
+@router.get("/mi", response_model=EmprendedorOut)
+def get_mi(
+    db: Session = Depends(get_db),
+    user: models.Usuario = Depends(get_current_user),
+):
+    emp = _ensure_emp_for_user(db, user)
+    return _to_out(emp)
+
+@router.put("/mi", response_model=EmprendedorOut)
+def put_mi(
+    payload: EmprendedorUpdate,
+    db: Session = Depends(get_db),
+    user: models.Usuario = Depends(get_current_user),
+):
+    emp = _ensure_emp_for_user(db, user)
+
+    for field in ["nombre", "telefono_contacto", "direccion", "rubro", "descripcion", "redes", "logo_url"]:
+        val = getattr(payload, field, None)
+        if val is not None:
+            setattr(emp, field, val.strip() if isinstance(val, str) else val)
+
+    db.add(emp)
+    db.commit()
+    db.refresh(emp)
+    return _to_out(emp)
+
+@router.post("/mi/logo", response_model=EmprendedorOut)
+async def upload_logo_mi(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: models.Usuario = Depends(get_current_user),
+):
+    emp = _ensure_emp_for_user(db, user)
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename).suffix.lower() or ".png"
+    fname = f"{uuid4().hex}{ext}"
+    dest = UPLOADS_DIR / fname
+
+    content = await file.read()
+    dest.write_bytes(content)
+
+    # url servida por StaticFiles en /uploads
+    emp.logo_url = f"/uploads/{fname}"
+    db.add(emp)
+    db.commit()
+    db.refresh(emp)
+    return _to_out(emp)

@@ -1,23 +1,12 @@
-# app/core/security.py
-from app.security import (
-    verify_password,
-    get_password_hash,
-    create_access_token,
-    decode_access_token,
-    get_user_id_from_token,
-)
-from app.config import settings
+# app/core/config.py
+from pydantic_settings import BaseSettings
 
-# Reexportamos las constantes por compatibilidad con imports viejos
-SECRET_KEY = settings.SECRET_KEY
-ALGORITHM = settings.ALGORITHM
+class Settings(BaseSettings):
+    SECRET_KEY: str = "CAMBIALA-PERO-FIJA-Y-LARGA"
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
 
-__all__ = [
-    "verify_password",
-    "get_password_hash",
-    "create_access_token",
-    "decode_access_token",
-    "get_user_id_from_token",
-    "SECRET_KEY",
-    "ALGORITHM",
-]
+    class Config:
+        env_file = ".env"
+
+settings = Settings()

@@ -1,198 +1,132 @@
 # app/models.py
 from sqlalchemy import (
-    Column, Integer, String, DateTime, ForeignKey, Boolean, UniqueConstraint,
-    Index, Time, Enum as SAEnum
+    Column, Integer, String, Boolean, DateTime, Time, Text, ForeignKey, Numeric, JSON, Index
 )
-
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship, Mapped, mapped_column
+from datetime import datetime
 from app.database import Base
-import enum
 
-
-# -------------------------
-# Enums / Choices
-# -------------------------
-class RolUsuario(str, enum.Enum):
-    cliente = "cliente"
-    emprendedor = "emprendedor"
-    admin = "admin"
-
-
-class EstadoTurno(str, enum.Enum):
-    pendiente = "pendiente"
-    confirmado = "confirmado"
-    cancelado = "cancelado"
-
-
-# -------------------------
-# Usuario
-# -------------------------
-
-
+# =========
+# USUARIO
+# =========
 class Usuario(Base):
     __tablename__ = "usuarios"
 
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(255), unique=True, index=True, nullable=False)
-    email = Column(String(255), unique=True, index=True, nullable=True)
-    password_hash = Column(String(255), nullable=False, default="")
-    rol = Column(String(50), nullable=False, default=RolUsuario.cliente.value)
-    avatar_url = Column(String(512), nullable=True)
-    suscripcion_activa = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    username: Mapped[str] = mapped_column(String(60), unique=True, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # Relaciones
-    emprendedor = relationship(
-        "Emprendedor",
-        back_populates="usuario",
-        uselist=False,
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
+    nombre: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    apellido: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    dni: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    rol: Mapped[str] = mapped_column(String(32), default="cliente", nullable=False)
 
-    # Si querés saber los turnos pedidos por un usuario (cuando reserves “como cliente”)
-    turnos = relationship(
-        "Turno",
-        back_populates="cliente",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        foreign_keys="Turno.cliente_id",
+    avatar_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relación 1:1 con Emprendedor
+    emprendedor: Mapped["Emprendedor"] = relationship(
+        "Emprendedor", back_populates="usuario", uselist=False
     )
 
 
-# -------------------------
-# Emprendedor
-# -------------------------
+# =============
+# EMPRENDEDOR
+# =============
 class Emprendedor(Base):
     __tablename__ = "emprendedores"
 
-    id = Column(Integer, primary_key=True, index=True)
-    usuario_id = Column(Integer, ForeignKey("usuarios.id", ondelete="CASCADE"), nullable=False, unique=True)
-    nombre = Column(String(255), nullable=False)          # obligatorio
-    descripcion = Column(String(1000), nullable=True)
-    codigo_cliente = Column(String(20), unique=True, nullable=True)  # para /reservar/:codigo
-    activo = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("usuarios.id", ondelete="CASCADE"), nullable=False)
 
-    usuario = relationship("Usuario", back_populates="emprendedor")
+    nombre: Mapped[str] = mapped_column(String(180), nullable=False)  # NOT NULL como pediste
+    telefono_contacto: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    direccion: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    rubro: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    descripcion: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    servicios = relationship(
-        "Servicio",
-        back_populates="emprendedor",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-    horarios = relationship(
-        "Horario",
-        back_populates="emprendedor",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
-    turnos = relationship(
-        "Turno",
-        back_populates="emprendedor",
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-        foreign_keys="Turno.emprendedor_id",
-    )
+    # Código público único (siempre mayúscula en endpoints)
+    codigo_cliente: Mapped[str] = mapped_column(String(16), unique=True, index=True, nullable=False)
+
+    # Redes sociales opcionales (array/objeto JSON)
+    redes: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+
+    # Logo (URL o path)
+    logo_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    usuario: Mapped["Usuario"] = relationship("Usuario", back_populates="emprendedor")
+    servicios: Mapped[list["Servicio"]] = relationship("Servicio", back_populates="emprendedor", cascade="all, delete-orphan")
+    horarios: Mapped[list["Horario"]] = relationship("Horario", back_populates="emprendedor", cascade="all, delete-orphan")
+    turnos: Mapped[list["Turno"]] = relationship("Turno", back_populates="emprendedor", cascade="all, delete-orphan")
+
+Index("ix_emprendedores_codigo_cliente", Emprendedor.codigo_cliente, unique=True)
 
 
-# -------------------------
-# Servicio
-# -------------------------
+# ==========
+# SERVICIO
+# ==========
 class Servicio(Base):
     __tablename__ = "servicios"
 
-    id = Column(Integer, primary_key=True, index=True)
-    emprendedor_id = Column(Integer, ForeignKey("emprendedores.id", ondelete="CASCADE"), nullable=False, index=True)
-    nombre = Column(String(255), nullable=False)
-    duracion_min = Column(Integer, nullable=False, default=30)
-    # Precio en centavos (p. ej.: $4.990 => 499000). Evita problemas de coma flotante.
-    precio = Column(Integer, nullable=False, default=0)
-    activo = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    emprendedor_id: Mapped[int] = mapped_column(ForeignKey("emprendedores.id", ondelete="CASCADE"), nullable=False)
 
-    emprendedor = relationship("Emprendedor", back_populates="servicios")
-    turnos = relationship("Turno", back_populates="servicio")
+    nombre: Mapped[str] = mapped_column(String(180), nullable=False)
+    precio: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    duracion_min: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    activo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    __table_args__ = (
-        # Evita repetir el mismo nombre de servicio en un mismo emprendedor si no querés duplicados exactos
-        UniqueConstraint("emprendedor_id", "nombre", name="uq_servicio_nombre_por_emprendedor"),
-        Index("ix_servicio_activo", "activo"),
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    emprendedor: Mapped["Emprendedor"] = relationship("Emprendedor", back_populates="servicios")
+    turnos: Mapped[list["Turno"]] = relationship("Turno", back_populates="servicio")
 
 
-# -------------------------
-# Horario (bloques de disponibilidad)
-# -------------------------
+# =========
+# HORARIO
+# =========
 class Horario(Base):
     __tablename__ = "horarios"
 
-    id = Column(Integer, primary_key=True, index=True)
-    emprendedor_id = Column(Integer, ForeignKey("emprendedores.id", ondelete="CASCADE"), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    emprendedor_id: Mapped[int] = mapped_column(ForeignKey("emprendedores.id", ondelete="CASCADE"), nullable=False)
 
-    # 0=Domingo ... 6=Sábado (coincide con datetime.weekday()? O con tu front. Ajustá si usás otro orden)
-    # Si tu front usa 0=Domingo, mantené esta convención.
-    dia_semana = Column(Integer, nullable=False)  # 0..6
+    # 0=Dom, 1=Lun, ..., 6=Sab
+    dia_semana: Mapped[int] = mapped_column(Integer, nullable=False)
+    hora_desde: Mapped[datetime | Time] = mapped_column(Time, nullable=False)
+    hora_hasta: Mapped[datetime | Time] = mapped_column(Time, nullable=False)
 
-    # Bloque horario (ej.: 09:00 a 13:00)
-    desde = Column(Time(timezone=False), nullable=False)
-    hasta = Column(Time(timezone=False), nullable=False)
+    intervalo_min: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    activo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
-    activo = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    emprendedor = relationship("Emprendedor", back_populates="horarios")
-
-    __table_args__ = (
-        # Evitar bloques idénticos duplicados
-        UniqueConstraint("emprendedor_id", "dia_semana", "desde", "hasta", name="uq_horario_bloque"),
-        Index("ix_horario_activo", "activo"),
-    )
+    emprendedor: Mapped["Emprendedor"] = relationship("Emprendedor", back_populates="horarios")
 
 
-# -------------------------
-# Turno
-# -------------------------
+# ======
+# TURNO
+# ======
 class Turno(Base):
     __tablename__ = "turnos"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    emprendedor_id: Mapped[int] = mapped_column(ForeignKey("emprendedores.id", ondelete="CASCADE"), nullable=False)
+    servicio_id: Mapped[int] = mapped_column(ForeignKey("servicios.id", ondelete="RESTRICT"), nullable=False)
 
-    # Dueño del calendario (obligatorio)
-    emprendedor_id = Column(Integer, ForeignKey("emprendedores.id", ondelete="CASCADE"), nullable=False, index=True)
+    inicio: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    fin: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
-    # Servicio tomado (opcional si dejás crear “turno libre”, pero idealmente obligatorio)
-    servicio_id = Column(Integer, ForeignKey("servicios.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Cliente (opcionalmente referenciable más adelante si querés)
+    usuario_cliente_id: Mapped[int | None] = mapped_column(ForeignKey("usuarios.id"), nullable=True)
+    cliente_nombre: Mapped[str | None] = mapped_column(String(180), nullable=True)
 
-    # Cliente que reservó (si es usuario del sistema). Puede ser null si la reserva es pública sin cuenta
-    cliente_id = Column(Integer, ForeignKey("usuarios.id", ondelete="SET NULL"), nullable=True, index=True)
+    notas: Mapped[str | None] = mapped_column(Text, nullable=True)
+    estado: Mapped[str] = mapped_column(String(24), default="confirmado", nullable=False)
 
-    # Datos básicos del turno
-    inicio = Column(DateTime(timezone=True), nullable=False, index=True)
-    fin = Column(DateTime(timezone=True), nullable=False, index=True)
+    creado_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
-    estado = Column(SAEnum(EstadoTurno), nullable=False, default=EstadoTurno.confirmado)
-  # o pendiente/confirmado/cancelado
-    motivo_cancelacion = Column(String(500), nullable=True)
-
-    # Snapshot de precio al momento de crear el turno (centavos)
-    precio_aplicado = Column(Integer, nullable=True)
-
-    # Datos útiles para mostrar en la agenda si no hay usuario
-    cliente_nombre = Column(String(255), nullable=True)
-    cliente_contacto = Column(String(255), nullable=True)  # tel/email
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-
-    emprendedor = relationship("Emprendedor", back_populates="turnos")
-    servicio = relationship("Servicio", back_populates="turnos")
-    cliente = relationship("Usuario", back_populates="turnos", foreign_keys=[cliente_id])
-
-    __table_args__ = (
-        # Un índice por rango de fechas del emprendedor ayuda a consultas por calendario
-        Index("ix_turno_emprendedor_inicio", "emprendedor_id", "inicio"),
-        Index("ix_turno_estado", "estado"),
-    )
+    emprendedor: Mapped["Emprendedor"] = relationship("Emprendedor", back_populates="turnos")
+    servicio: Mapped["Servicio"] = relationship("Servicio", back_populates="turnos")

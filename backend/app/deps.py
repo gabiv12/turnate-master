@@ -1,85 +1,71 @@
 # app/deps.py
-from typing import Optional
-from fastapi import Depends, HTTPException, status, Request
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+import secrets, string
+from datetime import datetime
 
 from app.database import get_db
-from app.security import decode_access_token, get_user_id_from_token
+from app.security import decode_access_token
 from app import models
 
+# Tu login real es /auth/login
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
-def _extract_token_from_request(request: Request) -> Optional[str]:
-    """
-    Extrae el token JWT desde:
-      1) Authorization: Bearer <token>
-      2) Cookie 'access_token'
-      3) Header 'token' (fallback)
-    """
-    auth = request.headers.get("Authorization") or request.headers.get("authorization")
-    if isinstance(auth, str) and auth.lower().startswith("bearer "):
-        return auth.split(" ", 1)[1].strip()
-
-    cookie_tok = request.cookies.get("access_token")
-    if cookie_tok:
-        return cookie_tok
-
-    hd_tok = request.headers.get("token")
-    if hd_tok:
-        return hd_tok.strip()
-
-    return None
-
-
-def get_current_user(request: Request, db: Session = Depends(get_db)):
-    """
-    Valida el JWT y devuelve el usuario (ORM) asociado.
-    """
-    token = _extract_token_from_request(request)
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Falta token",
-        )
-
+def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> models.Usuario:
     payload = decode_access_token(token)
     if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido/expirado",
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
 
-    # Intentamos obtener el user_id
-    user_id = get_user_id_from_token(token) or payload.get("sub") or payload.get("id") or payload.get("user_id")
-    try:
-        user_id = int(user_id)  # type: ignore[arg-type]
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token inválido (sub)",
-        )
+    sub = payload.get("sub")
+    if not sub:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido")
 
-    # Compatibilidad con nombre del modelo
-    UserModel = getattr(models, "Usuario", None) or getattr(models, "User", None)
-    if not UserModel:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Modelo de usuario no encontrado",
-        )
-
-    # Obtener usuario por ID (db.get si existe, si no .query)
+    # Compatibilidad: tokens viejos (sub=username) y nuevos (sub=id)
     user = None
     try:
-        user = db.get(UserModel, user_id)  # SQLAlchemy 1.4+
-    except Exception:
-        user = db.query(UserModel).filter(UserModel.id == user_id).first()
+        uid = int(sub)
+        user = db.get(models.Usuario, uid)
+    except (TypeError, ValueError):
+        user = db.query(models.Usuario).filter(models.Usuario.username == sub).first()
 
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Usuario no encontrado",
-        )
-
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
     return user
 
+def _gen_codigo(n=8) -> str:
+    ab = string.ascii_uppercase + string.digits
+    return "".join(secrets.choice(ab) for _ in range(n))
 
-__all__ = ["get_current_user", "_extract_token_from_request"]
+def get_current_emprendedor(
+    user: models.Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> models.Emprendedor:
+    """
+    Devuelve el Emprendedor del usuario autenticado.
+    Si no existe, lo CREA (ensure) con datos mínimos válidos.
+    """
+    Emp = models.Emprendedor
+    emp = db.query(Emp).filter(Emp.user_id == user.id).first()
+    if emp:
+        return emp
+
+    # Crear mínimo viable respetando restricciones (user_id, codigo_cliente, nombre, etc.)
+    codigo = _gen_codigo()
+    tries = 0
+    while db.query(Emp).filter(Emp.codigo_cliente == codigo).first() and tries < 3:
+        codigo = _gen_codigo(); tries += 1
+
+    emp = Emp(
+        user_id=user.id,
+        nombre=getattr(user, "username", "Mi Emprendimiento"),
+        codigo_cliente=codigo,
+        created_at=datetime.utcnow() if hasattr(Emp, "created_at") else None,
+    )
+    db.add(emp)
+    db.commit()
+    db.refresh(emp)
+    return emp

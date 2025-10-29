@@ -1,6 +1,6 @@
 // src/pages/AdminReportes.jsx
 import { useEffect, useMemo, useState } from "react";
-import api from "../services/api";
+import api from "../components/api"; // ⬅️ antes venía de "../services/api"
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
 } from "recharts";
@@ -131,7 +131,12 @@ export default function AdminReportes() {
       setPage(1); // reseteo paginación al aplicar filtros
     } catch (e) {
       console.error("AdminReportes: error cargando", e);
-      setMsg("⚠️ No se pudieron cargar los reportes. Verificá el backend /admin-lite.");
+      // Mensaje claro si el back responde 401 (solo admin)
+      if (e?.response?.status === 401) {
+        setMsg("Necesitás iniciar sesión con una cuenta de administrador para ver este panel.");
+      } else {
+        setMsg("⚠️ No se pudieron cargar los reportes. Verificá el backend /admin-lite.");
+      }
       setKpis({ usuarios: 0, emprendedores: 0, turnos: 0, cancelados: 0, ingresos: 0 });
       setServAgg([]);
       setTurnos([]);
@@ -252,7 +257,7 @@ export default function AdminReportes() {
                   const pct = Math.round(((s.cantidad || 0) / total) * 100);
                   return (
                     <li
-                      key={s.servicio + "-" + idx}
+                      key={`${s.servicio}-${idx}`}
                       className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2"
                     >
                       <div className="flex items-center gap-2 min-w-0">

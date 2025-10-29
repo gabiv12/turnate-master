@@ -1,72 +1,97 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+# app/routers/servicios.py
+from fastapi import APIRouter, Depends, HTTPException, Path
 from sqlalchemy.orm import Session
+
 from app.database import get_db
-from app.routers.deps import get_current_user
 from app import models
+from app.auth import get_current_user
 from app.schemas import ServicioCreate, ServicioUpdate, ServicioOut
 
 router = APIRouter(prefix="/servicios", tags=["servicios"])
 
-def _require_emprendedor(db: Session, user: models.Usuario) -> models.Emprendedor:
-    emp = db.query(models.Emprendedor).filter(models.Emprendedor.usuario_id == user.id).first()
+def _get_emprendedor_or_404(db: Session, user_id: int) -> models.Emprendedor:
+    emp = db.query(models.Emprendedor).filter(models.Emprendedor.user_id == user_id).first()
+    if not emp and hasattr(models.Emprendedor, "usuario_id"):
+        emp = db.query(models.Emprendedor).filter(models.Emprendedor.usuario_id == user_id).first()
     if not emp:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo para emprendedores")
+        raise HTTPException(status_code=404, detail="No sos emprendedor.")
     return emp
 
 @router.get("/mis", response_model=list[ServicioOut])
-def listar_mis_servicios(db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
-    emp = _require_emprendedor(db, user)
-    return db.query(models.Servicio).filter(models.Servicio.emprendedor_id == emp.id).order_by(models.Servicio.nombre.asc()).all()
-
-@router.post("", response_model=ServicioOut, status_code=201)
-def crear_servicio(payload: ServicioCreate, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
-    emp = _require_emprendedor(db, user)
-    srv = models.Servicio(
-        emprendedor_id=emp.id,
-        nombre=payload.nombre,
-        duracion_min=payload.duracion_min,
-        precio=payload.precio,
-        activo=payload.activo
+def listar_mis_servicios(
+    db: Session = Depends(get_db),
+    user: models.Usuario = Depends(get_current_user),
+):
+    emp = _get_emprendedor_or_404(db, user.id)
+    items = (
+        db.query(models.Servicio)
+        .filter(models.Servicio.emprendedor_id == emp.id)
+        .order_by(models.Servicio.id.asc())
+        .all()
     )
-    db.add(srv)
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Nombre de servicio duplicado")
-    db.refresh(srv)
-    return srv
+    return items
+
+@router.post("", response_model=ServicioOut)
+def crear_servicio(
+    payload: ServicioCreate,
+    db: Session = Depends(get_db),
+    user: models.Usuario = Depends(get_current_user),
+):
+    emp = _get_emprendedor_or_404(db, user.id)
+    item = models.Servicio(
+        nombre=payload.nombre.strip(),
+        duracion_min=getattr(payload, "duracion_min", None) or getattr(payload, "duracion", None) or 30,
+        precio=payload.precio,
+        emprendedor_id=emp.id,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
 
 @router.put("/{servicio_id}", response_model=ServicioOut)
-def actualizar_servicio(servicio_id: int, payload: ServicioUpdate, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
-    emp = _require_emprendedor(db, user)
-    srv = db.query(models.Servicio).filter(
-        models.Servicio.id == servicio_id,
-        models.Servicio.emprendedor_id == emp.id
-    ).first()
-    if not srv:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
+def actualizar_servicio(
+    payload: ServicioUpdate,
+    servicio_id: int = Path(..., ge=1),
+    db: Session = Depends(get_db),
+    user: models.Usuario = Depends(get_current_user),
+):
+    emp = _get_emprendedor_or_404(db, user.id)
+    item = (
+        db.query(models.Servicio)
+        .filter(models.Servicio.id == servicio_id, models.Servicio.emprendedor_id == emp.id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado.")
 
-    for field, value in payload.dict(exclude_unset=True).items():
-        setattr(srv, field, value)
+    if payload.nombre is not None:
+        item.nombre = payload.nombre.strip()
+    if payload.duracion_min is not None:
+        item.duracion_min = payload.duracion_min
+    if payload.precio is not None:
+        item.precio = payload.precio
 
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Conflicto al actualizar servicio")
-    db.refresh(srv)
-    return srv
-
-@router.delete("/{servicio_id}", status_code=204)
-def eliminar_servicio(servicio_id: int, db: Session = Depends(get_db), user: models.Usuario = Depends(get_current_user)):
-    emp = _require_emprendedor(db, user)
-    srv = db.query(models.Servicio).filter(
-        models.Servicio.id == servicio_id,
-        models.Servicio.emprendedor_id == emp.id
-    ).first()
-    if not srv:
-        raise HTTPException(status_code=404, detail="Servicio no encontrado")
-    db.delete(srv)
+    db.add(item)
     db.commit()
-    return None
+    db.refresh(item)
+    return item
+
+@router.delete("/{servicio_id}")
+def eliminar_servicio(
+    servicio_id: int = Path(..., ge=1),
+    db: Session = Depends(get_db),
+    user: models.Usuario = Depends(get_current_user),
+):
+    emp = _get_emprendedor_or_404(db, user.id)
+    item = (
+        db.query(models.Servicio)
+        .filter(models.Servicio.id == servicio_id, models.Servicio.emprendedor_id == emp.id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Servicio no encontrado.")
+
+    db.delete(item)
+    db.commit()
+    return {"detail": "Servicio eliminado."}
