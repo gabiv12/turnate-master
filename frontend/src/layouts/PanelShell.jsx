@@ -1,8 +1,10 @@
-import { useState } from "react";
-import { NavLink, Outlet, useNavigate, Link } from "react-router-dom";
-import { useUser } from "../context/UserContext.jsx"; // 👈 IMPORT UNIFICADO
+// src/layouts/PanelShell.jsx
+import { useEffect, useRef, useState } from "react";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useUser } from "../context/UserContext.jsx";
 import Header from "../components/Header.jsx";
 import Footer from "../components/Footer.jsx";
+import { isEmprendedor as empCheck, isAdmin as adminCheck } from "../utils/roles";
 
 const ItemLink = ({ to, children }) => (
   <NavLink
@@ -19,14 +21,27 @@ const ItemLink = ({ to, children }) => (
   </NavLink>
 );
 
-export default function PanelShell({ children }) {
-  const { user, logout } = useUser();
+export default function PanelShell() {
+  const { user, refreshUser, logout } = useUser();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
-  const rol = String(user?.rol || "").toLowerCase();
-  const showReservarBtn = !rol || rol === "cliente";
 
-  const Content = children ?? <Outlet />;
+  const [isEmp, setIsEmp] = useState(empCheck(user));
+  const [isAdm, setIsAdm] = useState(adminCheck(user));
+
+  useEffect(() => {
+    setIsEmp(empCheck(user));
+    setIsAdm(adminCheck(user));
+  }, [user]);
+
+  // 🚫 Evita doble fetch si algo re-monta el layout
+  const didInit = useRef(false);
+  useEffect(() => {
+    if (didInit.current) return;
+    didInit.current = true;
+    refreshUser?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-600 to-cyan-400">
@@ -58,18 +73,20 @@ export default function PanelShell({ children }) {
                     <div className="text-white/80 text-xs">Herramientas rápidas</div>
                   </div>
 
-                  <div className="space-y-3">
+                  <div className="space-y-3 mt-8">
+                    <ItemLink to="/reservar">Reservar</ItemLink>
                     <ItemLink to="/perfil">Editar Perfil</ItemLink>
                     <ItemLink to="/emprendimiento">Emprendimiento</ItemLink>
                     <ItemLink to="/turnos">Turnos</ItemLink>
-                    <ItemLink to="/estadisticas">Estadísticas</ItemLink>
                     
+                    {isAdm && <ItemLink to="/admin">Admin</ItemLink>}
+                    <ItemLink to="/estadisticas">Estadísticas</ItemLink>
                   </div>
 
                   <div className="mt-4">
                     <button
                       onClick={() => {
-                        logout();
+                        logout?.();
                         navigate("/login", { replace: true });
                       }}
                       className="w-full rounded-xl px-4 py-3 text-sm font-semibold text-white bg-gradient-to-r from-rose-600 to-red-500 shadow hover:brightness-110"
@@ -79,24 +96,19 @@ export default function PanelShell({ children }) {
                   </div>
 
                   <div className="mt-3 text-[11px] text-white/80">
-                    Sesión: {user?.username || user?.email || "—"}
+                    Hola, {user?.username || user?.nombre || "Usuario"} —{" "}
+                    <span className="font-semibold">
+                      {isAdm ? "Admin" : isEmp ? "Emprendedor" : "Cliente"}
+                    </span>
+                    .
                   </div>
                 </div>
               </div>
             </aside>
 
+            {/* ✅ alto mínimo arreglado para que no “se coma” Footer */}
             <section className="min-h-[60vh] min-w-0 bg-white/0">
-              {showReservarBtn && (
-                <div className="flex justify-end mb-3">
-                  <Link
-                    to="/reservar"
-                    className="rounded-full bg-gradient-to-r from-blue-500 to-emerald-400 text-white font-semibold px-4 py-2 shadow ring-1 ring-blue-300/40 hover:scale-[1.01] transition"
-                  >
-                    Reservar
-                  </Link>
-                </div>
-              )}
-              {Content}
+              <Outlet />
             </section>
           </div>
         </div>

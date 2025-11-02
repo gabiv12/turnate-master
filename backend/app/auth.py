@@ -1,93 +1,37 @@
 # app/auth.py
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+import os
+import bcrypt
+import jwt
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
-from fastapi import APIRouter, Depends, HTTPException, status, Form
-from fastapi.security import OAuth2PasswordRequestForm
-from jose import jwt, JWTError
-from passlib.context import CryptContext
-from sqlalchemy.orm import Session
+load_dotenv()
+JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+JWT_ALG = "HS256"
+JWT_EXP_MIN = int(os.getenv("JWT_EXP_MIN", "120"))
 
-from app.database import get_db
-from app import models
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt(12)).decode("utf-8")
 
-# === Config JWT ===
-SECRET_KEY = "CHANGE_ME_SECRET"  # usa env/config en prod
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 8  # 8 hs
-
-# === Password hashing ===
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# ✅ Alias para compatibilidad con código viejo
+def get_password_hash(plain: str) -> str:
+    return hash_password(plain)
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
-        return pwd_context.verify(plain, hashed)
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
     except Exception:
         return False
 
-def get_password_hash(p: str) -> str:
-    return pwd_context.hash(p)
+def create_access_token(user_id: int) -> str:
+    now = datetime.utcnow()
+    payload = {
+        "sub": str(user_id),
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=JWT_EXP_MIN)).timestamp())
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
-def create_access_token(subject: str, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = {"sub": subject}
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-def _get_user_by_username(db: Session, username: str) -> Optional[models.Usuario]:
-    return db.query(models.Usuario).filter(models.Usuario.username == username).first()
-
-def _get_user_by_id(db: Session, user_id: int) -> Optional[models.Usuario]:
-    return db.query(models.Usuario).filter(models.Usuario.id == user_id).first()
-
-# === Router ===
-router = APIRouter(prefix="/auth", tags=["auth"])
-
-@router.post("/login")
-def login(
-    db: Session = Depends(get_db),
-    form_data: OAuth2PasswordRequestForm = Depends(),
-):
-    # username/password vía x-www-form-urlencoded
-    user = _get_user_by_username(db, form_data.username)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
-
-    hashed = (
-        getattr(user, "password_hash", None)
-        or getattr(user, "hashed_password", None)
-        or getattr(user, "password", None)
-    )
-    if not hashed or not verify_password(form_data.password, hashed):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
-
-    access_token = create_access_token(subject=str(user.id))
-    return {"access_token": access_token, "token_type": "bearer"}
-
-# === Dependencia para rutas protegidas ===
-from fastapi import Header
-
-def _get_auth_header(authorization: Optional[str] = Header(default=None)) -> str:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Token inválido o faltante")
-    return authorization.split(" ", 1)[1].strip()
-
-def get_current_user(
-    db: Session = Depends(get_db),
-    token: str = Depends(_get_auth_header),
-) -> models.Usuario:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        sub = payload.get("sub")
-        if sub is None:
-            raise HTTPException(status_code=401, detail="Token inválido o expirado")
-        # sub es el id del usuario
-        user_id = int(sub)
-    except (JWTError, ValueError):
-        raise HTTPException(status_code=401, detail="Token inválido o expirado")
-
-    user = _get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(status_code=401, detail="Usuario no encontrado")
-    return user
+def decode_access_token(token: str) -> int:
+    data = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+    return int(data["sub"])

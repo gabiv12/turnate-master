@@ -1,6 +1,6 @@
 // src/pages/Reservar.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useNavigate, useLocation } from "react-router-dom";
+import { useParams, useNavigate, useLocation, Link } from "react-router-dom";
 import { format, startOfDay, endOfDay, isSameDay, addMinutes } from "date-fns";
 import es from "date-fns/locale/es";
 import api from "../services/api";
@@ -8,167 +8,204 @@ import PublicCalendar from "../components/PublicCalendar";
 
 const cx = (...c) => c.filter(Boolean).join(" ");
 const looksLikeCode = (s) => /^[A-Z0-9]{4,12}$/.test(String(s).trim().toUpperCase());
+const pad = (n) => String(n).padStart(2, "0");
+const toNaive = (dt) => {
+  const d = new Date(dt);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
+function FullscreenStatus({ title, caption }) {
+  return (
+    <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/60 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 p-6 text-center">
+        <div className="mx-auto mb-4 h-14 w-14 grid place-items-center rounded-full bg-slate-100">
+          <svg className="h-7 w-7 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" className="opacity-20" />
+            <path d="M21 12a 9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="2" className="opacity-80" />
+          </svg>
+        </div>
+        <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+        {caption && <p className="mt-1 text-sm text-slate-600">{caption}</p>}
+      </div>
+    </div>
+  );
+}
 
 function msg(err, fallback = "Ocurrió un error") {
   const d = err?.response?.data;
   if (typeof d === "string") return d;
   if (d?.detail) return typeof d.detail === "string" ? d.detail : (d.detail[0]?.msg || fallback);
-  return err?.message || fallback;
+  return fallback;
 }
 
-// Fallback POST: intenta varias rutas compatibles con distintos backends
-async function postFirst(paths, payload) {
-  let lastErr;
-  for (const p of paths) {
-    try {
-      const r = await api.post(p, payload);
-      return r?.data ?? {};
-    } catch (e) {
-      lastErr = e;
-      // si es 404/405/501 seguimos probando, si es 5xx cortamos
-      const s = e?.response?.status;
-      if (s >= 500) break;
-    }
+// === Adaptadores “públicos” ===
+async function fetchEmpByCode(c) {
+  // 1) endpoint público
+  try {
+    const r = await api.get(`/publico/emprendedores/by-codigo/${c}`);
+    return r.data;
+  } catch {}
+  // 2) fallback no-público
+  try {
+    const r = await api.get(`/emprendedores/by-codigo/${c}`);
+    return r.data;
+  } catch (e) {
+    throw e;
   }
-  throw lastErr;
+}
+
+async function fetchServiciosPublicos(empId) {
+  try {
+    const r = await api.get(`/publico/servicios/${empId}`);
+    return Array.isArray(r.data) ? r.data : [];
+  } catch {}
+  // fallbacks
+  try {
+    const r = await api.get(`/servicios/by-emprendedor/${empId}`);
+    return Array.isArray(r.data) ? r.data : [];
+  } catch {}
+  try {
+    const r = await api.get(`/servicios`, { params: { emprendedor_id: empId } });
+    return Array.isArray(r.data) ? r.data : [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchAgendaSlots(empId, desde, hasta) {
+  // 1) verdadero endpoint público de agenda
+  try {
+    const r = await api.get(`/publico/agenda`, { params: { emprendedor_id: empId, desde, hasta } });
+    return Array.isArray(r?.data?.slots) ? r.data.slots : [];
+  } catch {}
+  // 2) si no hay agenda pública, devolvemos [] y usamos fallback con horarios/turnos
+  return [];
 }
 
 export default function Reservar() {
-  const { codigo: codigoParam } = useParams(); // /reservar/:codigo (opcional)
+  const { code } = useParams();             // código público
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [codigo, setCodigo] = useState("");
-  const [buscando, setBuscando] = useState(false);
-  const [error, setError] = useState("");
-  const [okMsg, setOkMsg] = useState("");
-
-  const [emp, setEmp] = useState(null);
+  // Estado de datos
+  const [emp, setEmp] = useState(null);     // { id, nombre, descripcion, codigo_cliente, ...extras }
   const [servicios, setServicios] = useState([]);
-  const [horarios, setHorarios] = useState([]);
-  const [turnos, setTurnos] = useState([]);
+  const [horarios, setHorarios] = useState([]); // (fallback si no hay agenda)
+  const [turnos, setTurnos] = useState([]);     // (solo fallback)
+  const [agendaSlots, setAgendaSlots] = useState([]); // ← slots ISO desde /publico/agenda
 
-  // flujo paso a paso
+  // Selecciones
   const [fecha, setFecha] = useState(null);
   const [slot, setSlot] = useState(null);
   const [servicioId, setServicioId] = useState("");
-
-  // datos cliente + nota (aparecen al final)
   const [clienteNombre, setClienteNombre] = useState("");
   const [clienteContacto, setClienteContacto] = useState(""); // tel o email
-  const [nota, setNota] = useState("");
+  const [nota, setNota] = useState(""); // opcional (dirección u observación para el emprendedor)
 
   const [confirming, setConfirming] = useState(false);
-  const [showLoginAsk, setShowLoginAsk] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  // refs: guards y focos
-  const autoOnceRef = useRef(false);
+  const isAuth =
+    !!(localStorage.getItem("accessToken") ||
+       localStorage.getItem("token") ||
+       localStorage.getItem("access_token"));
+
+  // refs
   const lastCodeRef = useRef("");
   const searchingRef = useRef(false);
   const debounceRef = useRef(null);
-
+  const stepInfoRef = useRef(null);
   const stepCalRef = useRef(null);
   const stepSlotsRef = useRef(null);
-  const stepServicioRef = useRef(null);
   const stepDatosRef = useRef(null);
+  const stepConfirmRef = useRef(null);
 
-  // ------------ Buscar por código (usa /publico/*) ------------
-  const buscar = async (force = false) => {
-    setError("");
-    setOkMsg("");
-
-    const code = (codigo || "").trim().toUpperCase();
-    if (!looksLikeCode(code)) {
-      setError("Ingresá un código válido.");
-      return;
-    }
-    if (!force) {
+  // Carga inicial por código público
+  useEffect(() => {
+    const run = async () => {
+      const c = (code || "").toUpperCase().trim();
+      if (!looksLikeCode(c)) {
+        navigate("/ingresar-codigo", { replace: true, state: { from: location } });
+        return;
+      }
       if (searchingRef.current) return;
-      if (lastCodeRef.current === code && emp) return;
-    }
+      searchingRef.current = true;
 
-    // reset de flujo
-    if (lastCodeRef.current !== code) {
-      setEmp(null);
-      setServicios([]);
-      setHorarios([]);
-      setTurnos([]);
-      setFecha(null);
-      setSlot(null);
-      setServicioId("");
-      setClienteNombre("");
-      setClienteContacto("");
-      setNota("");
-    }
+      // reset si cambió el código
+      if (lastCodeRef.current !== c) {
+        setEmp(null);
+        setServicios([]);
+        setHorarios([]);
+        setTurnos([]);
+        setAgendaSlots([]);
+        setFecha(null);
+        setSlot(null);
+        setServicioId("");
+        setClienteNombre("");
+        setClienteContacto("");
+        setNota("");
+      }
 
-    searchingRef.current = true;
-    setBuscando(true);
-    try {
-      const e = await api.get(`/emprendedores/by-codigo/${code}`);
-      setEmp(e.data);
+      try {
+        // Emprendedor por código
+        const e = await fetchEmpByCode(c);
+        setEmp(e);
 
-      const [rs, rh] = await Promise.all([
-        api.get(`/publico/servicios/${code}`),
-        api.get(`/publico/horarios/${code}`),
-      ]);
-      setServicios(rs.data || []);
-      setHorarios(rh.data || []);
+        // Servicios públicos por emprendedor_id
+        const empId = e?.id;
+        const rs = await fetchServiciosPublicos(empId);
+        setServicios(rs || []);
 
-      // turnos del mes en curso (para bloquear slots)
-      const now = new Date();
-      const desde = startOfDay(new Date(now.getFullYear(), now.getMonth(), 1)).toISOString();
-      const hasta = endOfDay(new Date(now.getFullYear(), now.getMonth() + 1, 0)).toISOString();
-      const t = await api.get(`/publico/turnos/${code}`, { params: { desde, hasta, limit: 500 } });
-      setTurnos(t.data || []);
+        // Agenda (si existe endpoint público; si no, el fallback usa horarios/turnos)
+        const now = new Date();
+        const desde = toNaive(startOfDay(new Date(now.getFullYear(), now.getMonth(), 1)));
+        const hasta = toNaive(endOfDay(new Date(now.getFullYear(), now.getMonth() + 1, 0)));
+        const ag = await fetchAgendaSlots(empId, desde, hasta);
+        setAgendaSlots(ag || []);
 
-      lastCodeRef.current = code;
-
-      // foco al paso 1 (calendario)
-      queueMicrotask(() =>
-        stepCalRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-      );
-    } catch (err) {
-      setError(msg(err, "No se pudo cargar la agenda"));
-    } finally {
-      searchingRef.current = false;
-      setBuscando(false);
-    }
-  };
-
-  // auto /reservar/:codigo (una vez)
-  useEffect(() => {
-    if (!codigoParam || autoOnceRef.current) return;
-    autoOnceRef.current = true;
-    const c = String(codigoParam).trim().toUpperCase();
-    setCodigo(c);
-    queueMicrotask(() => buscar(true));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [codigoParam]);
-
-  // debounce al tipear
-  useEffect(() => {
-    if (debounceRef.current) {
-      clearTimeout(debounceRef.current);
-      debounceRef.current = null;
-    }
-    if (looksLikeCode(codigo) && lastCodeRef.current !== codigo.trim().toUpperCase()) {
-      debounceRef.current = setTimeout(() => buscar(true), 450);
-    }
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
+        // Fallback data
+        try {
+          const rh = await api.get(`/publico/horarios/${empId}`);
+          if (Array.isArray(rh.data)) setHorarios(rh.data);
+        } catch {}
+        try {
+          const rt = await api.get(`/publico/turnos/${empId}`);
+          if (Array.isArray(rt.data)) setTurnos(rt.data);
+        } catch {}
+      } catch (err) {
+        console.error("by-codigo error:", err);
+      } finally {
+        searchingRef.current = false;
+        lastCodeRef.current = c;
+        queueMicrotask(() => stepInfoRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [codigo]);
 
-  // días habilitados por horarios
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(run, 50);
+    return () => clearTimeout(debounceRef.current);
+  }, [code, navigate, location]);
+
+  // Habilita día en calendario
   const isDayEnabled = (date) => {
+    if (agendaSlots?.length) {
+      const dayStr = format(date, "yyyy-MM-dd");
+      return agendaSlots.some((s) => String(s).startsWith(dayStr));
+    }
     const day = date.getDay(); // 0=Dom
     return horarios.some((h) => h.activo && Number(h.dia_semana) === day);
   };
 
-  // slots del día (filtra ocupados)
+  // slots del día
   const slots = useMemo(() => {
-    if (!fecha || !horarios?.length) return [];
+    if (!fecha) return [];
+    if (agendaSlots?.length) {
+      const dayStr = format(fecha, "yyyy-MM-dd");
+      return agendaSlots.filter((s) => String(s).startsWith(dayStr)).map((s) => new Date(s));
+    }
+
+    // Fallback (si no hay /publico/agenda)
+    if (!horarios?.length) return [];
     const day = fecha.getDay();
 
     const ocupados = (turnos || [])
@@ -198,452 +235,424 @@ export default function Reservar() {
       });
 
     return list;
-  }, [fecha, horarios, turnos]);
+  }, [fecha, horarios, turnos, agendaSlots]);
 
-  // foco al pasar de paso
   useEffect(() => {
-    if (fecha && !slot) {
-      queueMicrotask(() =>
-        stepSlotsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-      );
-    }
+    if (fecha && !slot) queueMicrotask(() => stepCalRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }));
   }, [fecha]);
-
   useEffect(() => {
-    if (slot && !servicioId) {
-      queueMicrotask(() =>
-        stepServicioRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-      );
-    }
+    if (slot) queueMicrotask(() => stepSlotsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }));
   }, [slot]);
-
   useEffect(() => {
-    if (servicioId) {
-      queueMicrotask(() =>
-        stepDatosRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-      );
-    }
+    if (servicioId) queueMicrotask(() => stepDatosRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }));
   }, [servicioId]);
 
-  // confirmar: si no hay sesión, pedí login
+  // Crear reserva (requiere login; si no, envío a login)
   const onConfirm = () => {
-    const hasToken =
-      localStorage.getItem("token") ||
-      sessionStorage.getItem("token") ||
-      localStorage.getItem("accessToken");
-    if (!hasToken) {
-      setShowLoginAsk(true);
-      return;
-    }
     setConfirming(true);
+    if (!isAuth) {
+      setBusy(true);
+      setTimeout(() => {
+        navigate("/login", { replace: true, state: { from: location } });
+      }, 650);
+    }
+    queueMicrotask(() => stepConfirmRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }));
   };
 
-  // reservar (payload completo)
-  const confirmarReserva = async () => {
-    if (!emp || !slot || !servicioId) return;
+  // Reintentos con / sin nota si el backend no la acepta (evita 422)
+  function stripNote(obj) {
+    const copy = { ...obj };
+    delete copy.nota;
+    delete copy.notas;
+    delete copy.note;
+    return copy;
+  }
+  const detailMentionsNote = (e) => {
+    const d = e?.response?.data;
+    const text = typeof d?.detail === "string" ? d.detail : JSON.stringify(d?.detail || d || "");
+    return /nota|notas|extra fields/i.test(text);
+  };
+
+  async function crearReservaAdaptativa(empId, bodyBase) {
+    // Intentos con y sin nota según status 422
+    const tries = [
+      // Público directo (si existe)
+      { ep: "/publico/turnos", body: { ...bodyBase } },
+      { ep: "/publico/turnos", body: stripNote(bodyBase), onlyIfNote422: true },
+
+      // Formato privado clásico
+      { ep: "/turnos", body: { ...bodyBase } },
+      { ep: "/turnos", body: stripNote(bodyBase), onlyIfNote422: true },
+
+      // Compatibilidad con otras formas
+      {
+        ep: "/turnos",
+        body: {
+          servicio: bodyBase.servicio_id,
+          desde: bodyBase.inicio,
+          nombre_cliente: bodyBase.cliente_nombre,
+          contacto_cliente: bodyBase.cliente_contacto,
+          nota: bodyBase.notas,
+          emprendedor_id: empId,
+        },
+      },
+      {
+        ep: "/turnos",
+        body: stripNote({
+          servicio: bodyBase.servicio_id,
+          desde: bodyBase.inicio,
+          nombre_cliente: bodyBase.cliente_nombre,
+          contacto_cliente: bodyBase.cliente_contacto,
+          nota: bodyBase.notas,
+          emprendedor_id: empId,
+        }),
+        onlyIfNote422: true,
+      },
+
+      // Ultra-compat
+      {
+        ep: "/turnos/compat",
+        body: {
+          servicio_id: bodyBase.servicio_id,
+          datetime: bodyBase.inicio,
+          cliente_nombre: bodyBase.cliente_nombre,
+          notas: bodyBase.notas,
+          cliente_contacto: bodyBase.cliente_contacto,
+          emprendedor_id: empId,
+        },
+      },
+      {
+        ep: "/turnos/compat",
+        body: stripNote({
+          servicio_id: bodyBase.servicio_id,
+          datetime: bodyBase.inicio,
+          cliente_nombre: bodyBase.cliente_nombre,
+          notas: bodyBase.notas,
+          cliente_contacto: bodyBase.cliente_contacto,
+          emprendedor_id: empId,
+        }),
+        onlyIfNote422: true,
+      },
+    ];
+
+    let last = null;
+    for (const t of tries) {
+      try {
+        const r = await api.post(t.ep, t.body);
+        return r;
+      } catch (e) {
+        last = e;
+        const st = e?.response?.status;
+        // si es 422 y la queja menciona nota, habilitamos los intentos "onlyIfNote422"
+        if (st === 422 && detailMentionsNote(e)) {
+          continue; // los siguientes con onlyIfNote422 seguirán corriendo
+        }
+        if (![400,401,403,404,405,409,422].includes(st)) throw e;
+      }
+    }
+    throw last;
+  }
+
+  const crearReserva = async () => {
+    if (!emp?.id || !servicioId || !slot || !clienteNombre || !clienteContacto) return;
+    if (!isAuth) return; // ya se redirige en onConfirm
+
     try {
-      setBuscando(true);
-      setError("");
-      const payload = {
-        datetime: slot.toISOString(),
+      setBusy(true);
+
+      const base = {
+        emprendedor_id: emp.id,
         servicio_id: Number(servicioId),
-        cliente_nombre: (clienteNombre || "").trim(),
-        cliente_contacto: (clienteContacto || "").trim(), // tel o email
-        notas: (nota || "").trim(),
+        inicio: toNaive(slot),                 // naive (sin Z)
+        cliente_nombre: clienteNombre.trim(),
+        cliente_contacto: clienteContacto.trim(),
+        notas: (nota || "").trim(),           // opcional
       };
 
-      await postFirst(
-        [
-          `/turnos/compat/${emp.codigo_cliente}`,      // preferido (compat)
-          `/publico/reservar/${emp.codigo_cliente}`,   // alternativa pública
-          `/reservas/public/${emp.codigo_cliente}`,    // alternativa pública 2
-          `/turnos/reservar/${emp.codigo_cliente}`,    // alternativa
-        ],
-        payload
-      );
+      await crearReservaAdaptativa(emp.id, base);
 
-      setOkMsg("¡Listo! Tu reserva fue creada.");
-      setConfirming(false);
+      // refrescar agenda del día del turno
+      const desde = toNaive(startOfDay(slot));
+      const hasta = toNaive(endOfDay(slot));
+      const agenda = await fetchAgendaSlots(emp.id, desde, hasta);
+      setAgendaSlots(agenda || []);
 
-      // refrescar ocupados del día
-      const desde = startOfDay(new Date(slot)).toISOString();
-      const hasta = endOfDay(new Date(slot)).toISOString();
-      const t = await api.get(`/publico/turnos/${emp.codigo_cliente}`, { params: { desde, hasta } });
-      setTurnos(t.data || []);
-
-      // limpiar sólo la parte final para poder reservar otro horario
-      setSlot(null);
+      alert("¡Reserva creada! El emprendedor recibió el aviso.");
       setServicioId("");
+      setSlot(null);
       setClienteNombre("");
       setClienteContacto("");
       setNota("");
-      // volver a foco en los horarios
-      queueMicrotask(() =>
-        stepSlotsRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-      );
-    } catch (err) {
-      setError(msg(err, "No se pudo crear la reserva"));
       setConfirming(false);
+    } catch (err) {
+      alert(msg(err, "No se pudo crear la reserva."));
     } finally {
-      setBuscando(false);
+      setBusy(false);
     }
   };
 
-  // helpers display
-  const servicioSel = servicios.find((s) => s.id === Number(servicioId));
+  // ========= UI (manteniendo tu estética) =========
+  const shareURL = emp?.codigo_cliente
+    ? `${window.location.origin}/reservar/${emp.codigo_cliente}`
+    : "";
 
   return (
-    <div className="container-page py-4 md:py-6 space-y-4">
-      {/* Hero / info emprendimiento */}
-      <div className="booking-hero">
-        <div className="booking-hero__media">
-          <img src="/images/ReservaCodigo.png" alt="Reservá tu turno" />
-        </div>
-        <div className="booking-hero__body">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+    <div className="pt-24">
+      {busy && <FullscreenStatus title="Procesando…" caption="Por favor, esperá unos segundos." />}
+
+      <div className="mx-auto w-full max-w-7xl px-4 lg:px-6 space-y-10">
+        {/* Ficha del negocio */}
+        <section
+          ref={stepInfoRef}
+          className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm"
+        >
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div>
-              <div className="booking-hero__title">
-                {emp ? (emp.nombre || emp.negocio || "Emprendimiento") : "Reservá tu turno"}
-              </div>
-              <div className="booking-hero__meta">
-                {emp
-                  ? (emp.descripcion || "Elegí fecha y hora para reservar")
-                  : "Ingresá el código del emprendimiento para continuar"}
-              </div>
-            </div>
-
-            {/* Buscar por código */}
-            <div className="flex gap-2">
-              <input
-                value={codigo}
-                onChange={(e) => {
-                  setCodigo(e.target.value.toUpperCase());
-                  setError("");
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") buscar();
-                }}
-                placeholder="Código (p.ej. BL8B7Q)"
-                className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm w-44"
-              />
-              <button
-                onClick={() => buscar()}
-                disabled={buscando || !looksLikeCode(codigo)}
-                className="btn-primary disabled:opacity-60"
-              >
-                {buscando ? "Buscando..." : "Buscar"}
-              </button>
-            </div>
-          </div>
-
-          {/* Tarjeta breve con datos del emprendimiento */}
-          {emp && (
-            <>
-              <hr className="my-4 hr-soft" />
-              <div className="card bg-white/90 p-3 md:p-4">
-                <div className="flex items-start gap-3">
-                  {/* logo */}
-                  <div className="h-14 w-14 rounded-xl overflow-hidden bg-slate-100 border border-slate-200 shrink-0">
-                    {emp.foto_url || emp.logo_url ? (
-                      <img
-                        src={emp.foto_url || emp.logo_url}
-                        alt="Logo"
-                        className="h-full w-full object-cover"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      <div className="h-full w-full grid place-items-center text-slate-400 text-xs">
-                        LOGO
-                      </div>
-                    )}
+              <h1 className="text-2xl font-bold text-slate-900">
+                {emp?.nombre || "Negocio"}
+              </h1>
+              {emp?.descripcion ? (
+                <p className="mt-1 max-w-3xl text-sm text-slate-600">{emp.descripcion}</p>
+              ) : (
+                <p className="mt-1 text-sm text-slate-500">
+                  Ingresá día y horario para solicitar tu turno.
+                </p>
+              )}
+              {/* Extras (solo si existen) */}
+              <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                {emp?.direccion && (
+                  <div className="text-slate-700">
+                    <span className="font-semibold">Dirección: </span>
+                    <span className="text-slate-600">{emp.direccion}</span>
                   </div>
-
-                  <div className="min-w-0">
-                    {/* descripción */}
-                    {emp.descripcion && (
-                      <div className="text-sm text-slate-700">{emp.descripcion}</div>
-                    )}
-
-                    {/* contacto compacto */}
-                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">
-                      {emp.direccion && <span>📍 {emp.direccion}</span>}
-                      {emp.telefono || emp.telefono_contacto ? (
-                        <span>📞 {emp.telefono || emp.telefono_contacto}</span>
-                      ) : null}
-                      {emp.web && (
-                        <a
-                          className="link-soft"
-                          href={/^https?:\/\//i.test(emp.web) ? emp.web : `https://${emp.web}`}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          🌐 Sitio
-                        </a>
-                      )}
-                      {emp.instagram && (
-                        <a
-                          className="link-soft"
-                          href={
-                            emp.instagram.startsWith("http")
-                              ? emp.instagram
-                              : `https://instagram.com/${emp.instagram.replace(/^@/, "")}`
-                          }
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          📸 Instagram
-                        </a>
-                      )}
-                      {emp.email_contacto && <span>✉️ {emp.email_contacto}</span>}
-                    </div>
+                )}
+                {emp?.telefono && (
+                  <div className="text-slate-700">
+                    <span className="font-semibold">Teléfono: </span>
+                    <span className="text-slate-600">{emp.telefono}</span>
                   </div>
-                </div>
-              </div>
-            </>
-          )}
-
-          <div className="mt-3 text-sm text-slate-700">
-            1) Elegí un <b>día</b> &nbsp;•&nbsp; 2) Elegí un <b>horario</b> &nbsp;•&nbsp; 3) Elegí un <b>servicio</b> &nbsp;•&nbsp; 4) Completá tus <b>datos</b> y confirmá.
-          </div>
-        </div>
-      </div>
-
-      {/* Bloques paso a paso (sin scroll largo; cada bloque es compacto) */}
-      {emp && (
-        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-4">
-          {/* principal */}
-          <div className="space-y-4">
-            {/* Paso 1: Calendario */}
-            <div ref={stepCalRef} className="card p-4">
-              <div className="mb-2 font-medium text-slate-800">1) Elegí un día</div>
-              <PublicCalendar
-                selectedDate={fecha}
-                onSelectDate={(d) => {
-                  setFecha(d);
-                  setSlot(null);
-                  setServicioId("");
-                  setClienteNombre("");
-                  setClienteContacto("");
-                  setNota("");
-                }}
-                isDayEnabled={isDayEnabled}
-              />
-            </div>
-
-            {/* Paso 2: Horarios */}
-            {fecha && (
-              <div ref={stepSlotsRef} className="card p-4">
-                <div className="mb-2 font-medium text-slate-800">
-                  2) Elegí un horario —{" "}
-                  {format(fecha, "EEEE d 'de' MMMM", { locale: es })}
-                </div>
-                {slots.length === 0 ? (
-                  <div className="text-sm text-slate-500">No hay horarios para este día.</div>
-                ) : (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-                    {slots.map((d, i) => {
-                      const sel = slot && d.getTime() === slot.getTime();
-                      return (
-                        <button
-                          key={i}
-                          className={cx(
-                            "rounded-xl px-3 py-2 text-sm border",
-                            sel
-                              ? "bg-blue-600 text-white border-blue-600"
-                              : "bg-white border-slate-300 hover:bg-slate-50"
-                          )}
-                          onClick={() => {
-                            setSlot(d);
-                            setServicioId("");
-                            setClienteNombre("");
-                            setClienteContacto("");
-                            setNota("");
-                          }}
-                        >
-                          {format(d, "HH:mm")}
-                        </button>
-                      );
-                    })}
+                )}
+                {emp?.email_contacto && (
+                  <div className="text-slate-700">
+                    <span className="font-semibold">Email: </span>
+                    <span className="text-slate-600">{emp.email_contacto}</span>
+                  </div>
+                )}
+                {emp?.rubro && (
+                  <div className="text-slate-700">
+                    <span className="font-semibold">Rubro: </span>
+                    <span className="text-slate-600">{emp.rubro}</span>
+                  </div>
+                )}
+                {emp?.web && (
+                  <div className="text-slate-700">
+                    <span className="font-semibold">Web: </span>
+                    <a className="text-sky-600 underline" href={emp.web} target="_blank" rel="noreferrer">
+                      {emp.web}
+                    </a>
+                  </div>
+                )}
+                {emp?.redes && (
+                  <div className="text-slate-700">
+                    <span className="font-semibold">Redes: </span>
+                    <span className="text-slate-600">{emp.redes}</span>
+                  </div>
+                )}
+                {emp?.cuit && (
+                  <div className="text-slate-700">
+                    <span className="font-semibold">CUIT: </span>
+                    <span className="text-slate-600">{emp.cuit}</span>
                   </div>
                 )}
               </div>
-            )}
+            </div>
 
-            {/* Paso 3: Servicio */}
-            {slot && (
-              <div ref={stepServicioRef} className="card p-4">
-                <div className="mb-2 font-medium text-slate-800">3) Elegí un servicio</div>
-                <select
-                  className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
-                  value={servicioId}
-                  onChange={(e) => setServicioId(e.target.value)}
-                >
-                  <option value="">Elegí…</option>
-                  {servicios.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.nombre} · {s.duracion_min} min
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            {/* Paso 4: Datos del cliente + Nota (opcional) */}
-            {slot && servicioId && (
-              <div ref={stepDatosRef} className="card p-4">
-                <div className="mb-2 font-medium text-slate-800">
-                  4) Tus datos (para confirmar)
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <input
-                    className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
-                    placeholder="Tu nombre y apellido"
-                    value={clienteNombre}
-                    onChange={(e) => setClienteNombre(e.target.value)}
-                  />
-                  <input
-                    className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
-                    placeholder="Tu contacto (teléfono o email)"
-                    value={clienteContacto}
-                    onChange={(e) => setClienteContacto(e.target.value)}
-                  />
-                </div>
-                <textarea
-                  className="mt-3 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
-                  rows={3}
-                  placeholder="Nota para el emprendimiento (opcional)"
-                  value={nota}
-                  onChange={(e) => setNota(e.target.value)}
+            {/* Código público + link compartible */}
+            <div className="shrink-0 w-full md:w-72 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="text-xs font-semibold text-slate-500">Código público</div>
+              <div className="mt-1 flex gap-2">
+                <input
+                  readOnly
+                  value={emp?.codigo_cliente || ""}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
                 />
-                <div className="mt-3 text-xs text-slate-600">
-                  Estos datos sólo se usan para esta reserva.
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* sidebar: resumen + confirmar */}
-          {emp && (
-            <aside className="card p-4 lg:sticky lg:top-24 h-fit">
-              <div className="font-medium text-slate-800 mb-2">Resumen</div>
-
-              <div className="space-y-2 text-sm">
-                <div>
-                  <div className="text-slate-500">Emprendimiento</div>
-                  <div className="font-medium">{emp?.nombre || emp?.negocio || "-"}</div>
-                </div>
-                <div>
-                  <div className="text-slate-500">Fecha</div>
-                  <div className="font-medium">
-                    {fecha ? format(fecha, "EEEE d 'de' MMMM", { locale: es }) : "—"}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-slate-500">Horario</div>
-                  <div className="font-medium">{slot ? format(slot, "HH:mm") : "—"}</div>
-                </div>
-                <div>
-                  <div className="text-slate-500">Servicio</div>
-                  <div className="font-medium">
-                    {servicioSel ? `${servicioSel.nombre} · ${servicioSel.duracion_min} min` : "—"}
-                  </div>
-                </div>
-
-                {servicioId && (
-                  <>
-                    <div>
-                      <div className="text-slate-500">Tu nombre</div>
-                      <div className="font-medium">{clienteNombre || "—"}</div>
-                    </div>
-                    <div>
-                      <div className="text-slate-500">Contacto</div>
-                      <div className="font-medium">{clienteContacto || "—"}</div>
-                    </div>
-                    {nota && (
-                      <div>
-                        <div className="text-slate-500">Nota</div>
-                        <div className="font-medium">{nota}</div>
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-
-              <button
-                className="mt-4 w-full btn-primary disabled:opacity-60"
-                onClick={onConfirm}
-                disabled={!slot || !servicioId}
-              >
-                Confirmar reserva
-              </button>
-
-              {error && (
-                <div className="mt-3 rounded-xl bg-rose-50 text-rose-700 text-sm px-3 py-2 border border-rose-100">
-                  {error}
-                </div>
-              )}
-              {okMsg && (
-                <div className="mt-3 rounded-xl bg-emerald-50 text-emerald-700 text-sm px-3 py-2 border border-emerald-100">
-                  {okMsg}
-                </div>
-              )}
-            </aside>
-          )}
-        </div>
-      )}
-
-      {/* Modal: pedir login */}
-      {showLoginAsk && (
-        <div className="fixed inset-0 z-[60]">
-          <div className="absolute inset-0 bg-slate-900/50" onClick={() => setShowLoginAsk(false)} />
-          <div className="absolute inset-0 grid place-items-center p-4">
-            <div className="w-full max-w-md rounded-2xl bg-white shadow-xl ring-1 ring-slate-200">
-              <div className="px-5 py-4 border-b border-slate-100 font-semibold">
-                Necesitás iniciar sesión
-              </div>
-              <div className="p-5 text-sm text-slate-700">
-                Para reservar un turno primero tenés que iniciar sesión.
-              </div>
-              <div className="px-5 pb-5 flex gap-2">
-                <button className="btn-plain" onClick={() => setShowLoginAsk(false)}>Cancelar</button>
                 <button
-                  className="btn-primary"
-                  onClick={() => navigate(`/login?next=${encodeURIComponent(location.pathname)}`)}
+                  type="button"
+                  onClick={() => navigator.clipboard.writeText(emp?.codigo_cliente || "")}
+                  className="rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold hover:bg-slate-100"
                 >
-                  Ir a iniciar sesión
+                  Copiar
                 </button>
               </div>
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* Modal de confirmación */}
-      {confirming && (
-        <div className="fixed inset-0 z-[60]">
-          <div className="absolute inset-0 bg-slate-900/50" onClick={() => setConfirming(false)} />
-          <div className="absolute inset-0 grid place-items-center p-4">
-            <div className="w-full max-w-md rounded-2xl bg-white shadow-xl ring-1 ring-slate-200">
-              <div className="px-5 py-4 border-b border-slate-100 font-semibold">
-                Confirmar reserva
-              </div>
-              <div className="p-5 text-sm space-y-2">
-                <div>Emprendimiento: <b>{emp?.nombre || emp?.negocio}</b></div>
-                <div>Fecha: <b>{fecha ? format(fecha, "EEEE d 'de' MMMM", { locale: es }) : "-"}</b></div>
-                <div>Hora: <b>{slot ? format(slot, "HH:mm") : "-"}</b></div>
-                <div>Servicio: <b>{servicioSel?.nombre || "-"}</b></div>
-                {clienteNombre && <div>Nombre: <b>{clienteNombre}</b></div>}
-                {clienteContacto && <div>Contacto: <b>{clienteContacto}</b></div>}
-                {nota && <div>Nota: <b>{nota}</b></div>}
-              </div>
-              <div className="px-5 pb-5 flex gap-2">
-                <button className="btn-plain" onClick={() => setConfirming(false)}>Volver</button>
-                <button className="btn-primary" onClick={confirmarReserva}>Confirmar</button>
-              </div>
+              {shareURL && (
+                <div className="mt-3 text-xs">
+                  <div className="text-slate-500 mb-1">Link para compartir</div>
+                  <div className="flex gap-2">
+                    <input
+                      readOnly
+                      value={shareURL}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard.writeText(shareURL)}
+                      className="rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold hover:bg-slate-100"
+                    >
+                      Copiar
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
-        </div>
-      )}
+        </section>
+
+        {/* Paso 1: calendario */}
+        <section ref={stepCalRef} className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+          <h2 className="text-xl md:text-2xl font-semibold text-slate-900">1) Elegí un día</h2>
+          <p className="mt-1 text-sm text-slate-600">Mostramos los días con disponibilidad.</p>
+          <div className="mt-4">
+            <PublicCalendar
+              selectedDate={fecha}
+              onSelectDate={setFecha}
+              isDayEnabled={isDayEnabled}
+              initialMonth={new Date()}
+              monthsAhead={1}
+            />
+          </div>
+        </section>
+
+        {/* Paso 2: turnos del día */}
+        <section ref={stepSlotsRef} className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+          <h2 className="text-xl md:text-2xl font-semibold text-slate-900">2) Elegí un horario</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Los horarios disponibles se calculan automáticamente según la agenda del emprendedor.
+          </p>
+
+          {!fecha ? (
+            <div className="mt-4 text-sm text-slate-500">Primero elegí un día.</div>
+          ) : slots.length === 0 ? (
+            <div className="mt-4 text-sm text-slate-500">No hay horarios para este día.</div>
+          ) : (
+            <div className="mt-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+              {slots.map((d, i) => {
+                const sel = slot && d.getTime() === slot.getTime();
+                return (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => setSlot(d)}
+                    className={cx(
+                      "rounded-xl border px-3 py-2 text-sm font-medium",
+                      sel
+                        ? "border-sky-600 bg-sky-50 text-sky-900"
+                        : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
+                    )}
+                  >
+                    {format(d, "HH:mm", { locale: es })}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* Paso 3: datos y servicio */}
+        <section ref={stepDatosRef} className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+          <h2 className="text-xl md:text-2xl font-semibold text-slate-900">3) Tus datos</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Ingresá un contacto y elegí el servicio. <b>La nota es opcional</b> (por ejemplo una dirección o preferencia) y
+            queda visible para el emprendedor.
+          </p>
+
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm text-slate-700">Nombre</label>
+              <input
+                value={clienteNombre}
+                onChange={(e) => setClienteNombre(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                placeholder="Cliente X"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm text-slate-700">Teléfono o email</label>
+              <input
+                value={clienteContacto}
+                onChange={(e) => setClienteContacto(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                placeholder="cliente@example.com"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm text-slate-700">Servicio</label>
+              <select
+                className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                value={servicioId}
+                onChange={(e) => setServicioId(e.target.value)}
+              >
+                <option value="">Elegí un servicio</option>
+                {servicios.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.nombre} ({Number(s.duracion_min || s.duracion || 30)} min)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm text-slate-700">Notas (opcional)</label>
+              <input
+                value={nota}
+                onChange={(e) => setNota(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
+                placeholder="Ej.: dirección o preferencia"
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Paso 4: confirmación */}
+        <section ref={stepConfirmRef} className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+          <h2 className="text-xl md:text-2xl font-semibold text-slate-900">4) Confirmar</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            {slot ? <>Vas a reservar el <b>{format(slot, "EEEE d 'de' MMMM", { locale: es })}</b> a las <b>{format(slot, "HH:mm")}</b>.</> : <>Elegí día y horario.</>}
+          </p>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={onConfirm}
+              disabled={!slot || !servicioId || !clienteNombre || !clienteContacto}
+              className="rounded-xl bg-sky-600 px-5 py-3 text-white text-sm font-semibold shadow hover:bg-sky-700 disabled:opacity-50"
+            >
+              Confirmar reserva
+            </button>
+
+            {!isAuth && (
+              <span className="text-sm text-slate-600">
+                Necesitás iniciar sesión para completar la reserva.{" "}
+                <Link className="underline" to="/login" state={{ from: location }}>Ir al login</Link>
+              </span>
+            )}
+          </div>
+
+          {confirming && isAuth && (
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={crearReserva}
+                className="rounded-xl border border-slate-300 bg-white px-5 py-3 text-sm font-semibold hover:bg-slate-50"
+              >
+                Crear reserva
+              </button>
+            </div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

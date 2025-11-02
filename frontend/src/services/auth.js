@@ -1,28 +1,61 @@
 // src/services/auth.js
-import { api } from "./api";
+import api, { setAuthToken, clearAuthToken } from "./api";
 
-export async function login(identifier, password) {
-  const body = { identifier, username: identifier, password };
-  const { data } = await api.post("/usuarios/login", body);
-  const access_token = data.access_token || data.token;
-  const user = data.user || data?.data?.user || null;
-
-  if (!access_token || !user) {
-    throw new Error("Respuesta de login inválida");
-  }
-
-  localStorage.setItem("turnate_user", JSON.stringify(user));
-  localStorage.setItem("turnate_token", access_token);
-
-  return { access_token, user };
+/* Guarda token en TODAS las claves vistas en el repo (compat total) */
+function persistTokenCompat(token) {
+  if (!token) return;
+  try {
+    localStorage.setItem("accessToken", token);
+    localStorage.setItem("token", token);
+    localStorage.setItem("access_token", token);
+    localStorage.setItem("jwt", token);
+    localStorage.setItem("access", token);
+  } catch {}
+  setAuthToken(token);
 }
 
-export async function me() {
-  const { data } = await api.get("/usuarios/me");
-  return data;
+/* Login: username O email (evita 400 del backend) */
+export async function login(identifier, password) {
+  const id = String(identifier || "").trim();
+  const body = id.includes("@") ? { email: id, password } : { username: id, password };
+  const { data } = await api.post("/usuarios/login", body);
+  const token = data?.token || data?.access_token || data?.jwt;
+  if (!token) throw new Error("No se recibió token.");
+  persistTokenCompat(token);
+  return { token, user: data?.user || null };
 }
 
 export function logout() {
-  localStorage.removeItem("turnate_user");
-  localStorage.removeItem("turnate_token");
+  clearAuthToken();
+  try {
+    localStorage.removeItem("accessToken");
+    localStorage.removeItem("token");
+    localStorage.removeItem("access_token");
+    localStorage.removeItem("jwt");
+    localStorage.removeItem("access");
+  } catch {}
+}
+
+/* Registro: envía 'nombre' para no romper NOT NULL */
+export async function register({ email, username, password, nombre, apellido, dni }) {
+  const payload = {
+    email: String(email || "").trim().toLowerCase(),
+    username: String(username || "").trim(),
+    password: String(password || ""),
+    nombre: (nombre && String(nombre).trim()) || "Usuario",
+    apellido: (apellido && String(apellido).trim()) || "",
+    ...(dni ? { dni } : {}),
+  };
+  const { data } = await api.post("/usuarios/registro", payload);
+  const token = data?.token || data?.access_token || null;
+  if (token) persistTokenCompat(token);
+  return data;
+}
+
+/* Variante /me por si tu UI la usa */
+export async function activarEmprendedorMe() {
+  const { data } = await api.put("/usuarios/me/activar_emprendedor");
+  const token = data?.token || data?.access_token || null;
+  if (token) persistTokenCompat(token);
+  return data;
 }

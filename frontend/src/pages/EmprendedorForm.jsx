@@ -1,349 +1,371 @@
 // src/pages/EmprendedorForm.jsx
-import { useEffect, useMemo, useRef, useState } from "react";
-import { apiAuth } from "../services/api";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import api from "../services/api";
+import { useUser } from "../context/UserContext.jsx";
+import Input from "../components/Input";
+import Button from "../components/Button";
+import ModalActivacionEmprendedor from "../components/ModalActivacionEmprendedor.jsx";
 
-const BTN =
-  "rounded-full bg-gradient-to-r from-blue-600 to-cyan-400 px-5 py-2.5 text-white text-sm font-semibold shadow hover:brightness-110 disabled:opacity-60";
-const BOX =
-  "w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300";
-const LABEL = "block text-xs font-semibold text-sky-700 mb-1";
+const LABEL = "block text-sm font-semibold text-slate-700 mb-1";
+const BOX = "w-full rounded-xl border border-slate-200 bg-white/80 px-3 py-2 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
 
-function safeParseJSON(x) {
-  if (!x) return {};
-  if (typeof x === "object") return x;
-  try { return JSON.parse(x); } catch { return {}; }
-}
-
-function niceMsg(err) {
-  const st = err?.response?.status;
-  if (st === 401) return "Tu sesión se cerró. Iniciá sesión y volvé a intentar.";
-  const d = err?.response?.data;
-  if (typeof d === "string") return d;
-  if (d?.detail) return typeof d.detail === "string" ? d.detail : "Ocurrió un error.";
-  return err?.message || "Ocurrió un error.";
-}
-
-function redesObjectToList(obj = {}) {
-  const out = [];
-  for (const [k, v] of Object.entries(obj)) {
-    if (typeof v === "string" && v.trim()) out.push({ tipo: k, valor: v.trim() });
-  }
-  return out;
-}
-function redesListToObject(list = []) {
-  const out = {};
-  for (const it of list) {
-    const k = String(it?.tipo || "").trim();
-    const v = String(it?.valor || "").trim();
-    if (k && v) out[k] = v;
-  }
-  return out;
-}
+const LOGO_SRC_FALLBACK = ""; // si querés mostrar algo por defecto
 
 export default function EmprendedorForm() {
+  const { user, refreshUser, isEmprendedor } = useUser();
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [msgOk, setMsgOk] = useState("");
-  const [msgErr, setMsgErr] = useState("");
+  const [msg, setMsg] = useState("");
 
-  const [codigo, setCodigo] = useState("");
-  const [logoUrl, setLogoUrl] = useState("");
+  const [emp, setEmp] = useState(null);      // datos “oficiales” del backend
+  const [extras, setExtras] = useState(null); // datos locales (cuit/telefono/etc.)
+  const [showActivate, setShowActivate] = useState(false);
+
+  // Logo (local, sin backend)
+  const [logoPreview, setLogoPreview] = useState(LOGO_SRC_FALLBACK);
+  const [logoFile, setLogoFile] = useState(null);
   const fileRef = useRef(null);
 
-  const [form, setForm] = useState({
-    nombre: "",
-    telefono_contacto: "",
-    direccion: "",
-    rubro: "",
-    descripcion: "",
-  });
+  // URL pública (si hay código)
+  const publicUrl = useMemo(() => {
+    const code = emp?.codigo_cliente || "";
+    if (!code) return "";
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    return `${origin}/reservar/${code}`;
+  }, [emp]);
 
-  const [redes, setRedes] = useState([]); // [{tipo, valor}]
-  const [redNew, setRedNew] = useState({ tipo: "instagram", valor: "" });
+  // Clave para extras
+  const extrasKey = useMemo(() => (emp?.id ? `emp_extras_${emp.id}` : null), [emp?.id]);
 
-  async function load() {
-    setLoading(true);
-    setMsgErr("");
-    try {
-      const { data } = await apiAuth.get("/emprendedores/mi");
-      setCodigo(data?.codigo_cliente || "");
-      setLogoUrl(data?.logo_url || "");
+  useEffect(() => {
+    let t;
+    if (msg) t = setTimeout(() => setMsg(""), 2200);
+    return () => clearTimeout(t);
+  }, [msg]);
 
-      setForm({
-        nombre: data?.nombre || "",
-        telefono_contacto: data?.telefono_contacto || "",
-        direccion: data?.direccion || "",
-        rubro: data?.rubro || "",          // si tu back no lo tiene, luego lo omitimos en el retry
-        descripcion: data?.descripcion || "",
-      });
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      try {
+        // Asegurá sesión actualizada
+        await refreshUser?.();
+        // Trae “mi emprendedor”
+        const r = await api.get("/usuarios/me/emprendedor");
+        const data = r?.data || null;
+        setEmp(data);
 
-      const redesObj = safeParseJSON(data?.redes);
-      setRedes(redesObjectToList(redesObj));
-    } catch (e) {
-      setMsgErr(niceMsg(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => { load(); }, []);
-
-  const errNombre = useMemo(() => !form.nombre?.trim() ? "Ingresá el nombre comercial." : "", [form.nombre]);
-  const errTel = useMemo(() => {
-    const t = (form.telefono_contacto || "").trim();
-    if (!t) return ""; // opcional
-    return /^[\d+\-\s()]{6,}$/.test(t) ? "" : "Ingresá un teléfono válido.";
-  }, [form.telefono_contacto]);
-  const errWebs = useMemo(() => {
-    const w = redes.filter(r => r.tipo === "web").map(r => r.valor);
-    for (const v of w) {
-      if (v && !/^https?:\/\//i.test(v)) return "Las URLs deben empezar con http:// o https://";
-    }
-    return "";
-  }, [redes]);
+        // Cargar extras locales si existieran
+        if (data?.id) {
+          try {
+            const raw = localStorage.getItem(`emp_extras_${data.id}`);
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              setExtras(parsed);
+              if (parsed.logoDataURL) setLogoPreview(parsed.logoDataURL);
+            } else {
+              setExtras({
+                cuit: "",
+                telefono: "",
+                direccion: "",
+                rubro: "",
+                redes: "",
+                web: "",
+                email_contacto: "",
+              });
+            }
+          } catch {
+            setExtras({
+              cuit: "",
+              telefono: "",
+              direccion: "",
+              rubro: "",
+              redes: "",
+              web: "",
+              email_contacto: "",
+            });
+          }
+        }
+      } catch (e) {
+        // 404 => no es emprendedor todavía
+        setEmp(null);
+        setExtras(null);
+        setShowActivate(true);
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onChange = (e) => {
     const { name, value } = e.target;
-    setForm((p) => ({ ...p, [name]: value }));
+    setEmp((prev) => ({ ...prev, [name]: value }));
   };
 
-  const addRed = () => {
-    const tipo = String(redNew.tipo || "").trim();
-    const valor = String(redNew.valor || "").trim();
-    if (!tipo || !valor) return;
-    setRedes((prev) => [...prev, { tipo, valor }]);
-    setRedNew({ tipo: redNew.tipo, valor: "" });
+  const onChangeExtras = (e) => {
+    const { name, value } = e.target;
+    setExtras((prev) => ({ ...(prev || {}), [name]: value }));
   };
-  const removeRed = (idx) => setRedes((prev) => prev.filter((_, i) => i !== idx));
 
-  const putEmprendedor = async (payload) => {
-    // Primer intento: payload completo (redes como objeto)
+  const copy = async (txt) => {
     try {
-      const { data } = await apiAuth.put("/emprendedores/mi", payload);
-      return data;
-    } catch (e) {
-      // Si el back devuelve 422, probamos:
-      if (e?.response?.status === 422) {
-        // 1) Serializar redes como string JSON
-        const p2 = {
-          ...payload,
-          redes: JSON.stringify(payload.redes ?? {}),
-        };
-        try {
-          const { data } = await apiAuth.put("/emprendedores/mi", p2);
-          return data;
-        } catch (e2) {
-          // 2) Si aún falla, probamos también omitir 'rubro' por si el schema lo prohíbe
-          if (e2?.response?.status === 422) {
-            const { rubro, ...p3 } = p2;
-            const { data } = await apiAuth.put("/emprendedores/mi", p3);
-            return data;
-          }
-          throw e2;
-        }
-      }
-      throw e;
+      await navigator.clipboard.writeText(txt);
+      setMsg("Copiado al portapapeles.");
+    } catch {
+      setMsg("No se pudo copiar.");
     }
+  };
+
+  const onLogoChange = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setLogoFile(f);
+    const reader = new FileReader();
+    reader.onload = () => setLogoPreview(reader.result);
+    reader.readAsDataURL(f);
+  };
+
+  const persistExtrasLocal = () => {
+    if (!extrasKey) return;
+    try {
+      const payload = { ...(extras || {}) };
+      if (logoPreview && logoPreview.startsWith("data:")) {
+        payload.logoDataURL = logoPreview;
+      }
+      localStorage.setItem(extrasKey, JSON.stringify(payload));
+    } catch {}
   };
 
   const onSubmit = async (e) => {
     e.preventDefault();
-    if (saving) return;
+    if (!emp?.id) return;
 
-    if (errNombre || errTel || errWebs) {
-      setMsgErr(errNombre || errTel || errWebs);
-      return;
-    }
-
-    setSaving(true);
-    setMsgErr("");
-    setMsgOk("");
-
-    const payload = {
-      nombre: form.nombre?.trim(),
-      telefono_contacto: form.telefono_contacto?.trim() || null,
-      direccion: form.direccion?.trim() || null,
-      rubro: form.rubro?.trim() || null,
-      descripcion: form.descripcion?.trim() || null,
-      redes: redesListToObject(redes),
-    };
-
+    setSaving(true); setMsg("");
     try {
-      const data = await putEmprendedor(payload);
-      setMsgOk("Datos guardados correctamente.");
-      setCodigo(data?.codigo_cliente || codigo);
-      setLogoUrl(data?.logo_url || logoUrl);
-      setTimeout(() => setMsgOk(""), 2000);
-    } catch (e2) {
-      setMsgErr(niceMsg(e2));
+      // El back actual guarda seguro estos dos (y el código ya existe)
+      const payload = {
+        nombre: emp?.nombre || emp?.negocio || "",
+        descripcion: emp?.descripcion || "",
+        // No intentamos cambiar codigo_cliente si el back no lo permite
+      };
+
+      await api.put(`/emprendedores/${emp.id}`, payload);
+
+      // Persistimos extras localmente
+      persistExtrasLocal();
+
+      setMsg("Datos guardados.");
+    } catch {
+      setMsg("No se pudo guardar. Intentá nuevamente.");
     } finally {
       setSaving(false);
     }
   };
 
-  const onUploadLogo = async (e) => {
-    e.preventDefault();
-    if (!fileRef.current?.files?.[0]) return;
-    setMsgErr("");
-    setMsgOk("");
-
-    const fd = new FormData();
-    fd.append("file", fileRef.current.files[0]);
-
-    // Probar /emprendedores/mi/logo y fallback a /emprendedores/logo
-    const tries = [
-      () => apiAuth.post("/emprendedores/mi/logo", fd, { headers: { "Content-Type": "multipart/form-data" } }),
-      () => apiAuth.post("/emprendedores/logo", fd, { headers: { "Content-Type": "multipart/form-data" } }),
-    ];
+  const afterActivate = async () => {
+    setShowActivate(false);
+    // refresca user + emprendedor
     try {
-      let resp;
-      for (const t of tries) {
-        try { resp = await t(); break; } catch (err) { if (err?.response?.status === 404) continue; else throw err; }
+      await refreshUser?.();
+      const r = await api.get("/usuarios/me/emprendedor");
+      setEmp(r?.data || null);
+      if (r?.data?.id) {
+        const raw = localStorage.getItem(`emp_extras_${r.data.id}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          setExtras(parsed);
+          if (parsed.logoDataURL) setLogoPreview(parsed.logoDataURL);
+        } else {
+          setExtras({
+            cuit: "",
+            telefono: "",
+            direccion: "",
+            rubro: "",
+            redes: "",
+            web: "",
+            email_contacto: "",
+          });
+        }
       }
-      const url = resp?.data?.url || resp?.data?.logo_url;
-      if (url) setLogoUrl(url);
-      setMsgOk("Logo actualizado.");
-      fileRef.current.value = "";
-      setTimeout(() => setMsgOk(""), 2000);
-    } catch (e2) {
-      setMsgErr(niceMsg(e2));
+      setMsg("Modo Emprendedor activo.");
+    } catch {
+      setMsg("No se pudo cargar el emprendimiento.");
     }
   };
 
+  if (loading) {
+    return (
+      <div className="min-h-[50vh] grid place-items-center">
+        <div className="text-slate-600">Cargando…</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="grid gap-6">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="h-12 w-12 rounded-xl overflow-hidden border border-slate-200 bg-slate-50">
-            {logoUrl ? (
-              <img src={logoUrl} alt="Logo" className="h-full w-full object-cover" />
-            ) : (
-              <div className="grid h-full w-full place-items-center text-[10px] text-slate-400">Sin logo</div>
-            )}
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold text-slate-800">Mi Emprendimiento</h1>
-            <p className="text-sm text-slate-500">Editá tus datos públicos y redes sociales.</p>
-          </div>
-        </div>
+    <div className="rounded-2xl bg-white/95 shadow-lg ring-1 ring-slate-200 p-6">
+      <div className="mb-6">
+        <h1 className="text-xl font-bold text-slate-800">Emprendimiento</h1>
+        <p className="text-sm text-slate-600">Completá los datos de tu negocio.</p>
+      </div>
 
-        {codigo ? (
-          <div className="text-sm text-slate-600">
-            Código público: <b className="select-all text-slate-800">{codigo}</b>
-          </div>
-        ) : null}
-      </header>
-
-      {msgOk && (
-        <div className="rounded-xl bg-emerald-50 text-emerald-700 text-sm px-4 py-2 ring-1 ring-emerald-200">
-          {msgOk}
-        </div>
-      )}
-      {msgErr && (
-        <div className="rounded-xl bg-rose-50 text-rose-700 text-sm px-4 py-2 ring-1 ring-rose-200">
-          {msgErr}{" "}
-          {msgErr.includes("sesión se cerró") && (
-            <button className={`${BTN} ml-3`} onClick={() => (window.location.href = "/login")} type="button">
-              Iniciar sesión
-            </button>
-          )}
+      {msg && (
+        <div
+          className={`mb-4 rounded-lg px-3 py-2 text-sm ${
+            /No se pudo|error|incorrect|fall/i.test(msg)
+              ? "bg-red-50 text-red-700 ring-1 ring-red-200"
+              : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+          }`}
+        >
+          {msg}
         </div>
       )}
 
-      <form onSubmit={onSubmit} className="grid gap-5">
-        <div className="grid grid-cols-1 md:grid-cols-[1fr,auto] gap-3 items-end">
-          <div>
-            <label className={LABEL}>Nombre comercial</label>
-            <input className={BOX} name="nombre" value={form.nombre} onChange={onChange} disabled={loading || saving} />
-            {errNombre && <p className="mt-1 text-xs text-rose-600">{errNombre}</p>}
-          </div>
-          <div className="flex items-center gap-2">
-            <input ref={fileRef} type="file" accept="image/*" className="text-xs" disabled={loading} />
-            <button className={BTN} onClick={onUploadLogo} disabled={loading} type="button">
-              Subir logo
-            </button>
-          </div>
-        </div>
+      {!emp && showActivate && (
+        <ModalActivacionEmprendedor
+          open={showActivate}
+          onClose={() => setShowActivate(false)}
+          userId={user?.id}
+          onActivated={afterActivate}
+        />
+      )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label className={LABEL}>Teléfono de contacto (opcional)</label>
-            <input
-              className={BOX}
-              name="telefono_contacto"
-              value={form.telefono_contacto}
-              onChange={onChange}
-              disabled={loading || saving}
-              placeholder="+54 9 11 5555-5555"
-            />
-            {errTel && <p className="mt-1 text-xs text-rose-600">{errTel}</p>}
-          </div>
-          <div>
-            <label className={LABEL}>Rubro (opcional)</label>
-            <input className={BOX} name="rubro" value={form.rubro} onChange={onChange} disabled={loading || saving} />
-          </div>
-          <div className="md:col-span-2">
-            <label className={LABEL}>Dirección (opcional)</label>
-            <input className={BOX} name="direccion" value={form.direccion} onChange={onChange} disabled={loading || saving} />
-          </div>
-          <div className="md:col-span-2">
-            <label className={LABEL}>Descripción (opcional)</label>
-            <textarea rows={3} className={BOX} name="descripcion" value={form.descripcion} onChange={onChange} disabled={loading || saving} />
-          </div>
-        </div>
+      {emp && (
+        <form onSubmit={onSubmit} className="grid grid-cols-1 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-[auto,1fr] gap-6 items-start">
+            {/* Logo */}
+            <div className="flex flex-col items-center gap-3">
+              <div className="h-28 w-28 rounded-full overflow-hidden border border-slate-200 bg-slate-50">
+                {logoPreview ? (
+                  <img src={logoPreview} alt="logo" className="h-full w-full object-cover" />
+                ) : (
+                  <div className="grid h-full w-full place-items-center text-gray-400 text-xs">Sin logo</div>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={onLogoChange}
+                />
+                <button
+                  type="button"
+                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                  onClick={() => fileRef.current?.click()}
+                >
+                  Seleccionar logo
+                </button>
+                <button
+                  type="button"
+                  className="rounded-xl bg-blue-600 text-white px-3 py-2 text-sm font-semibold shadow hover:brightness-110"
+                  onClick={persistExtrasLocal}
+                >
+                  Guardar logo
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-500 text-center">
+                El logo se guarda localmente por ahora.
+              </p>
+            </div>
 
-        <div className="grid gap-2">
-          <label className={LABEL}>Redes sociales (opcionales)</label>
+            {/* Campos principales */}
+            <div className="grid gap-4">
+              <div>
+                <label className={LABEL}>Nombre del negocio</label>
+                <Input
+                  name="nombre"
+                  value={emp?.nombre || ""}
+                  onChange={onChange}
+                  className={BOX}
+                  required
+                />
+              </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-[160px,1fr,auto] gap-2">
-            <select className={BOX} value={redNew.tipo} onChange={(e) => setRedNew((p) => ({ ...p, tipo: e.target.value }))}>
-              <option value="instagram">Instagram</option>
-              <option value="facebook">Facebook</option>
-              <option value="whatsapp">WhatsApp</option>
-              <option value="web">Sitio web</option>
-              <option value="otro">Otro</option>
-            </select>
-            <input
-              className={BOX}
-              placeholder={redNew.tipo === "web" ? "https://tu-dominio.com" : "@tu_usuario / número / enlace"}
-              value={redNew.valor}
-              onChange={(e) => setRedNew((p) => ({ ...p, valor: e.target.value }))}
-            />
-            <button type="button" className={BTN} onClick={addRed} disabled={!redNew.valor.trim()}>
-              Agregar
-            </button>
-          </div>
+              <div>
+                <label className={LABEL}>Descripción</label>
+                <textarea
+                  name="descripcion"
+                  value={emp?.descripcion || ""}
+                  onChange={onChange}
+                  rows={3}
+                  className={BOX}
+                />
+              </div>
 
-          {errWebs && <p className="mt-1 text-xs text-rose-600">{errWebs}</p>}
-
-          {redes.length === 0 ? (
-            <p className="text-sm text-slate-500">No agregaste redes.</p>
-          ) : (
-            <ul className="grid gap-2">
-              {redes.map((r, idx) => (
-                <li key={idx} className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2">
-                  <div className="text-sm text-slate-800">
-                    <b className="capitalize">{r.tipo}:</b> <span className="break-all">{r.valor}</span>
-                  </div>
+              {/* Código público (solo lectura + copiar) */}
+              <div className="grid gap-2">
+                <label className={LABEL}>Código público</label>
+                <div className="flex gap-2">
+                  <Input
+                    readOnly
+                    value={emp?.codigo_cliente || ""}
+                    className={BOX + " font-mono"}
+                  />
                   <button
                     type="button"
-                    className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"
-                    onClick={() => removeRed(idx)}
+                    onClick={() => copy(emp?.codigo_cliente || "")}
+                    className="rounded-xl border px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
                   >
-                    Quitar
+                    Copiar
                   </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+                </div>
+                {publicUrl && (
+                  <div className="text-xs text-slate-600">
+                    Link para compartir:{" "}
+                    <button
+                      type="button"
+                      onClick={() => copy(publicUrl)}
+                      className="text-blue-600 underline"
+                    >
+                      {publicUrl}
+                    </button>
+                  </div>
+                )}
+              </div>
 
-        <div>
-          <button type="submit" className={BTN} disabled={loading || saving}>
-            {saving ? "Guardando…" : "Guardar cambios"}
-          </button>
-        </div>
-      </form>
+              {/* Extras (locales) */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className={LABEL}>CUIT</label>
+                  <Input name="cuit" value={extras?.cuit || ""} onChange={onChangeExtras} className={BOX} />
+                </div>
+                <div>
+                  <label className={LABEL}>Teléfono</label>
+                  <Input name="telefono" value={extras?.telefono || ""} onChange={onChangeExtras} className={BOX} />
+                </div>
+                <div className="md:col-span-2">
+                  <label className={LABEL}>Dirección</label>
+                  <Input name="direccion" value={extras?.direccion || ""} onChange={onChangeExtras} className={BOX} />
+                </div>
+                <div>
+                  <label className={LABEL}>Rubro</label>
+                  <Input name="rubro" value={extras?.rubro || ""} onChange={onChangeExtras} className={BOX} />
+                </div>
+                <div>
+                  <label className={LABEL}>Redes</label>
+                  <Input name="redes" value={extras?.redes || ""} onChange={onChangeExtras} className={BOX} placeholder="@mi_negocio / fb.com/mi_negocio" />
+                </div>
+                <div>
+                  <label className={LABEL}>Web</label>
+                  <Input name="web" value={extras?.web || ""} onChange={onChangeExtras} className={BOX} placeholder="https://…" />
+                </div>
+                <div>
+                  <label className={LABEL}>Email de contacto</label>
+                  <Input type="email" name="email_contacto" value={extras?.email_contacto || ""} onChange={onChangeExtras} className={BOX} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-1">
+            <Button type="submit" disabled={saving} className="rounded-xl">
+              {saving ? "Guardando…" : "Guardar cambios"}
+            </Button>
+          </div>
+        </form>
+      )}
     </div>
   );
 }

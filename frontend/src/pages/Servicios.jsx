@@ -1,390 +1,370 @@
 // src/pages/Servicios.jsx
 import { useEffect, useMemo, useState } from "react";
 import api from "../services/api";
+import { useUser } from "../context/UserContext.jsx";
 
-const money = new Intl.NumberFormat("es-AR", {
-  style: "currency",
-  currency: "ARS",
-  maximumFractionDigits: 0,
-});
+const BTN = "rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700 disabled:opacity-60";
+const BOX = "w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300";
+const LABEL = "block text-xs font-semibold text-sky-700 mb-1";
 
-const normSvc = (it = {}) => ({
-  id: it.id,
-  nombre: it.nombre ?? "",
-  duracion_min:
-    Number(it.duracion_min ?? it.duracion ?? it.duracionMinutos ?? 30) || 30,
-  precio: Number(it.precio ?? 0) || 0,
-});
+function friendly(err) {
+  const s = err?.response?.status;
+  if (s === 401) return "Tu sesión se cerró. Iniciá sesión.";
+  if (s === 403) return "No autorizado.";
+  return err?.response?.data?.detail || err?.message || "No disponible por el momento.";
+}
 
-// ---- Helpers de compatibilidad de endpoints ----
-async function tryEndpoints(fns) {
-  let lastErr;
-  for (const fn of fns) {
-    try {
-      return await fn();
-    } catch (e) {
-      // Solo seguimos probando si es 404/405 (no existe/no permitido aquí)
-      const st = e?.response?.status;
-      if (st !== 404 && st !== 405) throw e;
-      lastErr = e;
-    }
+function replacePathParams(path, params = {}) {
+  if (!path) return path;
+  let out = path;
+  Object.entries(params).forEach(([k, v]) => {
+    out = out.replace(new RegExp(`{${k}}`, "g"), String(v));
+  });
+  return out;
+}
+
+async function discoverServicioPaths() {
+  try {
+    const { data } = await api.get("/openapi.json");
+    const paths = data?.paths || {};
+    const all = Object.entries(paths);
+
+    const contains = (p, kw) => kw.some((k) => p.toLowerCase().includes(k));
+    const ks = ["servicio", "servicios"];
+
+    // LIST (GET)
+    const listCand = all
+      .filter(([p, def]) => def?.get && contains(p, ks))
+      .map(([p]) => p);
+
+    // CREATE (POST)
+    const createCand = all
+      .filter(([p, def]) => def?.post && contains(p, ks))
+      .map(([p]) => p);
+
+    // UPDATE (PUT/PATCH) con /{id}
+    const updateCand = all
+      .filter(([p, def]) => (def?.put || def?.patch) && contains(p, ks) && /{.*id.*}/i.test(p))
+      .map(([p]) => p);
+
+    // DELETE con /{id}
+    const deleteCand = all
+      .filter(([p, def]) => def?.delete && contains(p, ks) && /{.*id.*}/i.test(p))
+      .map(([p]) => p);
+
+    // Reordenar por preferencia “mis/…”, luego “/emprendedores/{id}/…”
+    const pref = (arr) => [
+      ...arr.filter((p) => /\/mis\b/i.test(p)),
+      ...arr.filter((p) => /emprendedores\/{.*id.*}\//i.test(p)),
+      ...arr,
+    ].filter((v, i, a) => a.indexOf(v) === i);
+
+    return {
+      list: pref(listCand)[0] || null,
+      create: pref(createCand)[0] || null,
+      updateId: pref(updateCand)[0] || null,
+      deleteId: pref(deleteCand)[0] || null,
+    };
+  } catch {
+    return { list: null, create: null, updateId: null, deleteId: null };
   }
-  if (lastErr) throw lastErr;
-}
-
-// Listar servicios (devuelve array)
-async function listServicios() {
-  const r = await tryEndpoints([
-    () => api.get("/servicios/mis"),
-    () => api.get("/mis/servicios"),
-    () => api.get("/emprendedores/mi/servicios"),
-  ]);
-  const data = Array.isArray(r?.data) ? r.data : Array.isArray(r?.data?.items) ? r.data.items : [];
-  return data.map(normSvc);
-}
-
-// Crear servicio
-async function createServicio(payload) {
-  const body = {
-    nombre: payload.nombre,
-    duracion_min: Number(payload.duracion_min),
-    duracion: Number(payload.duracion_min), // compat
-    precio: Number(payload.precio),
-  };
-  await tryEndpoints([
-    () => api.post("/servicios", body),
-    () => api.post("/mis/servicios", body),
-    () => api.post("/emprendedores/mi/servicios", body),
-  ]);
-}
-
-// Actualizar servicio
-async function updateServicio(id, payload) {
-  const body = {
-    nombre: payload.nombre,
-    duracion_min: Number(payload.duracion_min),
-    duracion: Number(payload.duracion_min), // compat
-    precio: Number(payload.precio),
-  };
-  await tryEndpoints([
-    () => api.put(`/servicios/${id}`, body),
-    () => api.put(`/mis/servicios/${id}`, body),
-    () => api.put(`/emprendedores/mi/servicios/${id}`, body),
-    // fallback PATCH si algún router viejo no acepta PUT
-    () => api.patch(`/servicios/${id}`, body),
-    () => api.patch(`/mis/servicios/${id}`, body),
-    () => api.patch(`/emprendedores/mi/servicios/${id}`, body),
-  ]);
-}
-
-// Eliminar servicio
-async function deleteServicio(id) {
-  await tryEndpoints([
-    () => api.delete(`/servicios/${id}`),
-    () => api.delete(`/mis/servicios/${id}`),
-    () => api.delete(`/emprendedores/mi/servicios/${id}`),
-  ]);
 }
 
 export default function Servicios() {
+  const { user } = useUser() || {};
+  const [emp, setEmp] = useState(null);
+
+  const [paths, setPaths] = useState({ list: null, create: null, updateId: null, deleteId: null });
   const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
-  const [ok, setOk] = useState("");
-  const [form, setForm] = useState({ nombre: "", duracion_min: 30, precio: 0 });
-  const [editing, setEditing] = useState(null); // {id,...} o null
-  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState("");
 
-  const totalServicios = useMemo(() => items.length, [items]);
-  const precioPromedio = useMemo(() => {
-    if (!items.length) return 0;
-    const s = items.reduce((acc, it) => acc + (Number(it.precio) || 0), 0);
-    return Math.round(s / items.length);
-  }, [items]);
+  // Form crear / editar
+  const [editId, setEditId] = useState(null);
+  const [form, setForm] = useState({ nombre: "", duracion: 30, precio: "" });
 
-  async function load() {
+  const canSubmit = useMemo(
+    () => form.nombre.trim().length > 0 && Number(form.duracion) >= 5,
+    [form]
+  );
+
+  // ---- helpers de rutas tolerantes ----
+  async function getEmp() {
     try {
-      setErr("");
-      setOk("");
-      setLoading(true);
-      const arr = await listServicios();
-      setItems(arr);
-    } catch (e) {
-      setErr(
-        e?.response?.data?.detail || "No se pudieron cargar los servicios."
-      );
-    } finally {
-      setLoading(false);
+      const { data } = await api.get("/usuarios/me/emprendedor");
+      setEmp(data);
+      return data;
+    } catch {
+      return null;
     }
   }
 
+  async function listServicios(empId) {
+    // 1) OpenAPI si existe
+    if (paths.list) {
+      try {
+        const path = replacePathParams(paths.list, { id: empId, emprendedor_id: empId });
+        const r = await api.get(path);
+        return Array.isArray(r.data) ? r.data : (r.data?.items || []);
+      } catch {}
+    }
+    // 2) Fallbacks
+    const tries = [
+      () => api.get("/servicios/mis"),
+      () => api.get("/mis/servicios"),
+      () => api.get("/servicios/mis-servicios"),
+      () => api.get("/servicios"),
+      () => api.get(`/emprendedores/${empId}/servicios`),
+    ];
+    for (const fn of tries) {
+      try { const r = await fn(); return Array.isArray(r.data) ? r.data : (r.data?.items || []); } catch {}
+    }
+    throw new Error("No se pudo obtener la lista.");
+  }
+
+  async function createServicio(empId, data) {
+    const body = {
+      nombre: data.nombre,
+      duracion_minutos: Number(data.duracion),
+      duracion_min: Number(data.duracion),
+      precio: data.precio ? Number(data.precio) : undefined,
+      emprendedor_id: empId,
+    };
+    if (paths.create) {
+      try {
+        const path = replacePathParams(paths.create, { id: empId, emprendedor_id: empId });
+        return await api.post(path, body);
+      } catch {}
+    }
+    const tries = [
+      () => api.post("/servicios", body),
+      () => api.post("/mis/servicios", body),
+      () => api.post("/servicios/mis", body),
+      () => api.post(`/emprendedores/${empId}/servicios`, body),
+    ];
+    for (const fn of tries) { try { return await fn(); } catch {} }
+    throw new Error("No se pudo crear el servicio.");
+  }
+
+  async function updateServicio(empId, id, data) {
+    const body = {
+      nombre: data.nombre,
+      duracion_minutos: Number(data.duracion),
+      duracion_min: Number(data.duracion),
+      precio: data.precio ? Number(data.precio) : undefined,
+      emprendedor_id: empId,
+    };
+    if (paths.updateId) {
+      const p = replacePathParams(paths.updateId, { id, servicio_id: id, emprendedor_id: empId });
+      try { return await api.patch(p, body); } catch {}
+      try { return await api.put(p, body); } catch {}
+    }
+    const tries = [
+      () => api.patch(`/servicios/${id}`, body),
+      () => api.put(`/servicios/${id}`, body),
+      () => api.patch(`/emprendedores/${empId}/servicios/${id}`, body),
+      () => api.put(`/emprendedores/${empId}/servicios/${id}`, body),
+    ];
+    for (const fn of tries) { try { return await fn(); } catch {} }
+    throw new Error("No se pudo actualizar el servicio.");
+  }
+
+  async function deleteServicio(empId, id) {
+    if (paths.deleteId) {
+      const p = replacePathParams(paths.deleteId, { id, servicio_id: id, emprendedor_id: empId });
+      try { return await api.delete(p); } catch {}
+    }
+    const tries = [
+      () => api.delete(`/servicios/${id}`),
+      () => api.delete(`/emprendedores/${empId}/servicios/${id}`),
+      () => api.delete(`/mis/servicios/${id}`),
+    ];
+    for (const fn of tries) { try { return await fn(); } catch {} }
+    throw new Error("No se pudo eliminar el servicio.");
+  }
+
+  // ---- carga inicial ----
   useEffect(() => {
-    load();
+    (async () => {
+      setLoading(true); setMsg("");
+      try {
+        setPaths(await discoverServicioPaths());
+        const e = await getEmp();
+        const list = await listServicios(e?.id);
+        setItems(list);
+      } catch (e) {
+        setMsg(friendly(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const resetForm = () =>
-    setForm({ nombre: "", duracion_min: 30, precio: 0 });
-
+  // ---- handlers ----
   const onChange = (e) => {
     const { name, value } = e.target;
-    setForm((p) => {
-      if (name === "duracion_min" || name === "precio") {
-        const n = Number(value);
-        return { ...p, [name]: Number.isFinite(n) ? n : 0 };
-      }
-      return { ...p, [name]: value };
-    });
-  };
-
-  const onEdit = (svc) => {
-    const n = normSvc(svc);
-    setEditing(n);
-    setForm({ nombre: n.nombre, duracion_min: n.duracion_min, precio: n.precio });
-    setErr("");
-    setOk("");
-  };
-
-  const onCancelEdit = () => {
-    setEditing(null);
-    resetForm();
-  };
-
-  const onDelete = async (svc) => {
-    if (!svc?.id) return;
-    if (!confirm(`¿Eliminar el servicio "${svc.nombre}"?`)) return;
-    try {
-      setSaving(true);
-      setErr("");
-      setOk("");
-      await deleteServicio(svc.id);
-      setOk("Servicio eliminado.");
-      await load();
-    } catch (e) {
-      setErr(
-        e?.response?.data?.detail ||
-          "No se pudo eliminar el servicio. Si persiste, contactá al administrador."
-      );
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const validate = () => {
-    if (!form.nombre?.trim()) return "Ingresá el nombre del servicio.";
-    if (!Number.isFinite(form.duracion_min) || form.duracion_min <= 0)
-      return "Ingresá una duración válida (minutos).";
-    if (!Number.isFinite(form.precio) || form.precio < 0)
-      return "Ingresá un precio válido (>= 0).";
-    return null;
+    setForm((p) => ({ ...p, [name]: name === "duracion" ? Number(value) : value }));
   };
 
   const onSubmit = async (e) => {
     e.preventDefault();
-    if (saving) return;
-
-    const v = validate();
-    if (v) {
-      setErr(v);
-      setTimeout(() => setErr(""), 2200);
-      return;
-    }
-
-    const payload = {
-      nombre: form.nombre.trim(),
-      duracion_min: Number(form.duracion_min),
-      precio: Number(form.precio),
-    };
-
+    if (!canSubmit || !emp?.id) return;
+    setLoading(true); setMsg("");
     try {
-      setSaving(true);
-      setErr("");
-      setOk("");
-      if (editing?.id) {
-        await updateServicio(editing.id, payload);
-        setOk("Servicio actualizado.");
+      if (editId) {
+        await updateServicio(emp.id, editId, form);
       } else {
-        await createServicio(payload);
-        setOk("Servicio creado.");
+        await createServicio(emp.id, form);
       }
-      await load();
-      onCancelEdit();
-      setTimeout(() => setOk(""), 2000);
-    } catch (e) {
-      const msg =
-        e?.response?.data?.detail ||
-        e?.response?.data?.message ||
-        (e?.response?.status === 401
-          ? "Tu sesión expiró. Volvé a iniciar sesión."
-          : e?.response?.status === 422
-          ? "Datos inválidos. Revisá los campos."
-          : "No se pudo guardar el servicio.");
-      setErr(msg);
+      const list = await listServicios(emp.id);
+      setItems(list);
+      setForm({ nombre: "", duracion: 30, precio: "" });
+      setEditId(null);
+      setMsg(editId ? "Servicio actualizado." : "Servicio creado.");
+    } catch (e2) {
+      setMsg(friendly(e2));
     } finally {
-      setSaving(false);
+      setLoading(false);
+      setTimeout(() => setMsg(""), 2200);
+    }
+  };
+
+  const onEdit = (it) => {
+    setEditId(it.id);
+    setForm({
+      nombre: it.nombre || "",
+      duracion: Number(it.duracion_min ?? it.duracion_minutos ?? 30),
+      precio: it.precio ?? "",
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const onDelete = async (id) => {
+    if (!emp?.id) return;
+    if (!confirm("¿Eliminar este servicio?")) return;
+    setLoading(true); setMsg("");
+    try {
+      await deleteServicio(emp.id, id);
+      const list = await listServicios(emp.id);
+      setItems(list);
+      setMsg("Servicio eliminado.");
+    } catch (e2) {
+      setMsg(friendly(e2));
+    } finally {
+      setLoading(false);
+      setTimeout(() => setMsg(""), 1800);
     }
   };
 
   return (
-    <div className="grid gap-6">
-      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-        <div>
-          <h1 className="text-xl font-semibold text-slate-800">Servicios</h1>
-          <p className="text-sm text-slate-500">
-            Gestioná los servicios que ofrecés y sus duraciones/precios.
-          </p>
+    <div className="space-y-4">
+      {/* Header coherente */}
+      <div className="-mx-4 lg:-mx-6 overflow-x-clip">
+        <div className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow">
+          <div className="mx-auto max-w-7xl px-4 lg:px-6">
+            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Servicios</h1>
+            <p className="text-sm md:text-base/relaxed opacity-90">
+              Definí lo que ofrecés y la duración. Luego podrás asignar turnos.
+            </p>
+          </div>
         </div>
-        <div className="text-sm text-slate-600">
-          Total: <b>{totalServicios}</b> &middot; Promedio:{" "}
-          <b>{money.format(precioPromedio)}</b>
-        </div>
-      </header>
+      </div>
 
-      {/* Formulario */}
-      <form
-        onSubmit={onSubmit}
-        className="rounded-2xl border border-slate-200 bg-white p-4 md:p-5 grid gap-3"
-      >
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <div className="md:col-span-1">
-            <label className="block text-xs font-semibold text-sky-700 mb-1">
-              Nombre
-            </label>
+      {/* Form alta/edición */}
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        {msg && (
+          <div className={`mb-4 rounded-xl px-4 py-2 text-sm ${/cerró|error|No se pudo|403|404|500/.test(msg) ? "bg-red-50 text-red-700 ring-1 ring-red-200" : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"}`}>
+            {msg}
+          </div>
+        )}
+
+        <form onSubmit={onSubmit} className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="md:col-span-2">
+            <label className={LABEL}>Nombre del servicio</label>
             <input
-              type="text"
               name="nombre"
               value={form.nombre}
               onChange={onChange}
-              placeholder="Ej: Corte + lavado"
-              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
+              placeholder="Corte de pelo"
+              className={BOX}
+              required
             />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-sky-700 mb-1">
-              Duración (min)
-            </label>
+            <label className={LABEL}>Duración (min)</label>
             <input
               type="number"
               min={5}
-              max={600}
               step={5}
-              name="duracion_min"
-              value={form.duracion_min}
+              name="duracion"
+              value={form.duracion}
               onChange={onChange}
-              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
+              className={BOX}
+              required
             />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-sky-700 mb-1">
-              Precio (ARS)
-            </label>
+            <label className={LABEL}>Precio (opcional)</label>
             <input
               type="number"
               min={0}
-              step={100}
+              step={50}
               name="precio"
               value={form.precio}
               onChange={onChange}
-              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
+              className={BOX}
+              placeholder="0"
             />
           </div>
-        </div>
 
-        <div className="flex items-center gap-2">
-          {editing ? (
-            <>
+          <div className="md:col-span-2 flex items-end">
+            <button type="submit" disabled={!canSubmit || loading} className={BTN}>
+              {editId ? "Guardar cambios" : "Crear servicio"}
+            </button>
+            {editId && (
               <button
                 type="button"
-                onClick={onCancelEdit}
-                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-50"
+                onClick={() => { setEditId(null); setForm({ nombre: "", duracion: 30, precio: "" }); }}
+                className="ml-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50"
               >
-                Cancelar
+                Cancelar edición
               </button>
-              <button
-                type="submit"
-                disabled={saving}
-                className="rounded-xl bg-emerald-600 px-5 py-2 text-white text-sm font-semibold shadow hover:bg-emerald-700 disabled:opacity-60"
-              >
-                {saving ? "Guardando…" : "Guardar cambios"}
-              </button>
-            </>
-          ) : (
-            <button
-              type="submit"
-              disabled={saving}
-              className="rounded-xl bg-sky-600 px-5 py-2 text-white text-sm font-semibold shadow hover:bg-sky-700 disabled:opacity-60"
-            >
-              {saving ? "Guardando…" : "Agregar servicio"}
-            </button>
-          )}
-        </div>
-
-        {ok && (
-          <div className="rounded-xl bg-emerald-50 text-emerald-700 text-sm px-4 py-2 ring-1 ring-emerald-200">
-            {ok}
+            )}
           </div>
-        )}
-        {err && (
-          <div className="rounded-xl bg-rose-50 text-rose-700 text-sm px-4 py-2 ring-1 ring-rose-200">
-            {err}
-          </div>
-        )}
-      </form>
+        </form>
+      </div>
 
       {/* Lista */}
-      <div className="rounded-2xl border border-slate-200 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-slate-50 text-slate-600">
-            <tr>
-              <th className="text-left px-3 py-2.5">Servicio</th>
-              <th className="text-left px-3 py-2.5">Duración</th>
-              <th className="text-left px-3 py-2.5">Precio</th>
-              <th className="px-3 py-2.5 text-right">Acciones</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {loading ? (
-              <tr>
-                <td colSpan={4} className="px-3 py-6 text-center text-slate-500">
-                  Cargando…
-                </td>
-              </tr>
-            ) : items.length === 0 ? (
-              <tr>
-                <td colSpan={4} className="px-3 py-6 text-center text-slate-500">
-                  Aún no cargaste servicios.
-                </td>
-              </tr>
-            ) : (
-              items.map((it) => (
-                <tr key={it.id}>
-                  <td className="px-3 py-2.5 font-medium text-slate-800">
-                    {it.nombre}
-                  </td>
-                  <td className="px-3 py-2.5">{it.duracion_min} min</td>
-                  <td className="px-3 py-2.5">{money.format(it.precio)}</td>
-                  <td className="px-3 py-2.5">
-                    <div className="flex justify-end gap-2">
-                      <button
-                        className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 hover:bg-slate-50"
-                        onClick={() => onEdit(it)}
-                      >
-                        Editar
-                      </button>
-                      <button
-                        className="rounded-lg bg-rose-600 text-white px-3 py-1.5 hover:bg-rose-700"
-                        onClick={() => onDelete(it)}
-                      >
-                        Eliminar
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="mb-3 font-medium text-slate-700">Tus servicios</div>
+        {items.length === 0 ? (
+          <div className="text-sm text-slate-500">Aún no cargaste servicios.</div>
+        ) : (
+          <ul className="divide-y divide-slate-100">
+            {items.map((it) => (
+              <li key={it.id} className="py-3 flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-medium text-slate-900">{it.nombre}</div>
+                  <div className="text-xs text-slate-500">
+                    {Number(it.duracion_min ?? it.duracion_minutos ?? 30)} min
+                    {it.precio ? ` · AR$ ${Number(it.precio)}` : ""}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => onEdit(it)} className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold hover:bg-slate-50">
+                    Editar
+                  </button>
+                  <button onClick={() => onDelete(it.id)} className="rounded-xl bg-rose-600 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-700">
+                    Eliminar
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   );

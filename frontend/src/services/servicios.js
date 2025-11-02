@@ -1,21 +1,21 @@
-// src/services/servicios.js
-import api from './api';
+// src/api/servicios.js
+import api from "./client";
 
-// Lista solo los del emprendedor logueado
-export const listarMisServicios = () => api.get('/servicios/mis');
+export async function listarMisServicios() {
+  const { data } = await api.get("/servicios/mis");
+  return data;
+}
 
-// Crear servicio
-export const crearServicio = (data) => api.post('/servicios', data);
+export async function crearServicio(payload) {
+  const { data } = await api.post("/servicios/mis", payload);
+  return data;
+}
 
-// Actualizar servicio (IMPORTANTE: usar PUT, no PATCH)
-export const actualizarServicio = (id, data) => api.put(`/servicios/${id}`, data);
+export async function actualizarServicio(id, patch) {
+  const { data } = await api.put(`/servicios/mis/${id}`, patch);
+  return data;
+}
 
-// Borrar servicio
-export const eliminarServicio = (id) => api.delete(`/servicios/${id}`);
-
-export default {
-  listarMisServicios,
-  crearServicio,
-  actualizarServicio,
-  eliminarServicio,
-};
+export async function eliminarServicio(id) {
+  await api.delete(`/servicios/mis/${id}`);
+}

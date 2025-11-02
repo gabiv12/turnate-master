@@ -1,89 +1,58 @@
-# app/routers/emprendedores.py
-from pathlib import Path
-from uuid import uuid4
-
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+﻿from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-
-from app.database import get_db
-from app import models
-from app.auth import get_current_user
-from app.schemas import EmprendedorOut, EmprendedorUpdate
-from app.config import UPLOADS_DIR
+from ..models import Emprendedor, Usuario
+from ..schemas import EmprendedorCreate, EmprendedorUpdate, EmprendedorBase
+from ..deps import get_db, get_current_user
 
 router = APIRouter(prefix="/emprendedores", tags=["emprendedores"])
 
-def _ensure_emp_for_user(db: Session, user: models.Usuario) -> models.Emprendedor:
-    emp = db.query(models.Emprendedor).filter(models.Emprendedor.user_id == user.id).first()
-    if not emp and hasattr(models.Emprendedor, "usuario_id"):
-        emp = db.query(models.Emprendedor).filter(models.Emprendedor.usuario_id == user.id).first()
+@router.get("/by-codigo/{codigo}", response_model=EmprendedorBase)
+def by_codigo(codigo: str, db: Session = Depends(get_db)):
+    e = db.query(Emprendedor).filter(Emprendedor.codigo_cliente == codigo).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="Código no encontrado")
+    return e
 
-    if not emp:
-        # Crear básico si no existe (compat con tu flujo)
-        emp = models.Emprendedor(
-            user_id=getattr(user, "id"),  # si tu modelo usa usuario_id, el flush lo mapea
-            nombre=user.username,
-        )
-        # mapear también usuario_id si existe la columna
-        if hasattr(models.Emprendedor, "usuario_id"):
-            emp.usuario_id = user.id
-        db.add(emp)
-        db.commit()
-        db.refresh(emp)
-    return emp
+@router.post("", response_model=EmprendedorBase, status_code=201)
+def crear(payload: EmprendedorCreate, db: Session = Depends(get_db), user: Usuario = Depends(get_current_user)):
+    if db.query(Emprendedor).filter(Emprendedor.usuario_id == user.id).first():
+        raise HTTPException(status_code=409, detail="Ya tenés un emprendimiento")
+    e = Emprendedor(usuario_id=user.id, nombre=payload.nombre, descripcion=payload.descripcion, activo=True)
+    db.add(e); db.commit(); db.refresh(e)
+    return e
 
-def _to_out(emp: models.Emprendedor) -> EmprendedorOut:
-    # rellenar alias de compat
-    data = EmprendedorOut.model_validate(emp)
-    if data.usuario_id is None:
-        data.usuario_id = data.user_id
-    return data
+@router.get("/{emp_id}", response_model=EmprendedorBase)
+def obtener(emp_id: int, db: Session = Depends(get_db), user: Usuario = Depends(get_current_user)):
+    e = db.query(Emprendedor).filter(Emprendedor.id == emp_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="No existe")
+    if e.usuario_id != user.id:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    return e
 
-@router.get("/mi", response_model=EmprendedorOut)
-def get_mi(
-    db: Session = Depends(get_db),
-    user: models.Usuario = Depends(get_current_user),
-):
-    emp = _ensure_emp_for_user(db, user)
-    return _to_out(emp)
+@router.put("/{emp_id}", response_model=EmprendedorBase)
+def actualizar(emp_id: int, payload: EmprendedorUpdate, db: Session = Depends(get_db), user: Usuario = Depends(get_current_user)):
+    e = db.query(Emprendedor).filter(Emprendedor.id == emp_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="No existe")
+    if e.usuario_id != user.id:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(e, k, v)
+    db.commit(); db.refresh(e)
+    return e
 
-@router.put("/mi", response_model=EmprendedorOut)
-def put_mi(
-    payload: EmprendedorUpdate,
-    db: Session = Depends(get_db),
-    user: models.Usuario = Depends(get_current_user),
-):
-    emp = _ensure_emp_for_user(db, user)
-
-    for field in ["nombre", "telefono_contacto", "direccion", "rubro", "descripcion", "redes", "logo_url"]:
-        val = getattr(payload, field, None)
-        if val is not None:
-            setattr(emp, field, val.strip() if isinstance(val, str) else val)
-
-    db.add(emp)
-    db.commit()
-    db.refresh(emp)
-    return _to_out(emp)
-
-@router.post("/mi/logo", response_model=EmprendedorOut)
-async def upload_logo_mi(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    user: models.Usuario = Depends(get_current_user),
-):
-    emp = _ensure_emp_for_user(db, user)
-
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    ext = Path(file.filename).suffix.lower() or ".png"
-    fname = f"{uuid4().hex}{ext}"
-    dest = UPLOADS_DIR / fname
-
-    content = await file.read()
-    dest.write_bytes(content)
-
-    # url servida por StaticFiles en /uploads
-    emp.logo_url = f"/uploads/{fname}"
-    db.add(emp)
-    db.commit()
-    db.refresh(emp)
-    return _to_out(emp)
+@router.post("/{emp_id}/generar-codigo")
+def generar_codigo(emp_id: int, db: Session = Depends(get_db), user: Usuario = Depends(get_current_user)):
+    e = db.query(Emprendedor).filter(Emprendedor.id == emp_id).first()
+    if not e:
+        raise HTTPException(status_code=404, detail="No existe")
+    if e.usuario_id != user.id:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    import random, string
+    code = "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+    while db.query(Emprendedor).filter(Emprendedor.codigo_cliente == code).first():
+        code = "".join(random.choice(string.ascii_uppercase + string.digits) for _ in range(6))
+    e.codigo_cliente = code
+    db.commit(); db.refresh(e)
+    return {"codigo_cliente": e.codigo_cliente}

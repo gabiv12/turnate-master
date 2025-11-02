@@ -1,4 +1,4 @@
-# app/routers/public_servicios.py
+﻿# app/routers/public_servicios.py
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -31,3 +31,4 @@ def servicios_public_by_codigo(codigo: str, db: Session = Depends(get_db)):
         pass
 
     return q.all()
+

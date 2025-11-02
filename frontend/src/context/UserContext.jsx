@@ -1,130 +1,92 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
-import api from "../components/api"; // mantiene tu instancia actual
+// src/context/UserContext.jsx
+import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import api, { getAuthToken, setAuthToken, clearAuthToken } from "../services/api";
 
-export const UserContext = createContext({
-  user: null,
-  setUser: () => {},
-  loginCtx: async () => {},
-  registerCtx: async () => {},
-  logout: () => {},
-});
+// === helpers de rol (tolerantes) ===
+function hasRole(user, name) {
+  if (!user) return false;
+  const target = String(name || "").toLowerCase();
 
-function setAuthToken(token) {
-  try {
-    if (token) {
-      localStorage.setItem("accessToken", token);
-      if (api?.defaults?.headers) {
-        api.defaults.headers.common["Authorization"] = `Bearer ${token}`;
-      }
-    } else {
-      localStorage.removeItem("accessToken");
-      if (api?.defaults?.headers?.common?.Authorization) {
-        delete api.defaults.headers.common["Authorization"];
-      }
-    }
-  } catch {}
+  // rol simple
+  const single = String(user.rol || "").toLowerCase();
+  if (single === target) return true;
+
+  // array de roles
+  const roles = user.roles || [];
+  for (const r of roles) {
+    const v = (r && (r.nombre || r)) ? String(r.nombre || r).toLowerCase() : "";
+    if (v === target) return true;
+  }
+
+  // flags alternativos comunes
+  if ((user.es_emprendedor || user.is_emprendedor) && target === "emprendedor") return true;
+
+  return false;
 }
+
+const UserCtx = createContext(null);
+export const useUser = () => useContext(UserCtx);
 
 export function UserProvider({ children }) {
-  const [user, setUser] = useState(() => {
-    try {
-      const raw = localStorage.getItem("user");
-      return raw ? JSON.parse(raw) : null;
-    } catch { return null; }
-  });
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true); // evita "Cargando..." infinito si no se corta
 
-  // Inyectar token guardado al montar
-  useEffect(() => {
+  const boot = useCallback(async () => {
+    setLoading(true);
     try {
-      const token = localStorage.getItem("accessToken");
-      if (token) setAuthToken(token);
-    } catch {}
+      const t = getAuthToken();
+      if (!t) {
+        setUser(null);
+        setLoading(false);
+        return;
+      }
+      const { data } = await api.get("/usuarios/me");
+      setUser(data || null);
+    } catch {
+      clearAuthToken();
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  // Persistir user
   useEffect(() => {
-    try {
-      if (user) localStorage.setItem("user", JSON.stringify(user));
-      else localStorage.removeItem("user");
-    } catch {}
-  }, [user]);
+    boot();
+  }, [boot]);
 
-  const loginCtx = async ({ email, username, password }) => {
-    const payload = password
-      ? (email ? { email, password } : { username, password })
-      : { email: email || username };
-
-    // Intento 1
+  const refreshUser = useCallback(async () => {
     try {
-      const res = await api.post("/usuarios/login", payload);
-      const token = res?.data?.token || res?.data?.access_token;
-      const u = res?.data?.user || res?.data?.user_schema || res?.data?.usuario || res?.data;
-      if (!token || !u) throw new Error("Respuesta de login incompleta");
-      setAuthToken(token);
-      setUser(u);
-      return u;
-    } catch (err1) {
-      // Intento 2 (fallback)
-      try {
-        const res = await api.post("/auth/login", payload);
-        const token = res?.data?.token || res?.data?.access_token;
-        const u = res?.data?.user || res?.data?.usuario || res?.data;
-        if (!token || !u) throw new Error("Respuesta de login incompleta");
-        setAuthToken(token);
-        setUser(u);
-        return u;
-      } catch (err2) {
-        const d = err2?.response?.data || err1?.response?.data;
-        const msg = d?.detail || d?.message || "No se pudo iniciar sesión";
-        throw new Error(msg);
-      }
+      const { data } = await api.get("/usuarios/me");
+      setUser(data || null);
+      return data || null;
+    } catch {
+      return null;
     }
-  };
+  }, []);
 
-  const registerCtx = async ({ username, email, password }) => {
-    const body = { username, email, password };
-
-    // Intento 1
-    try {
-      await api.post("/usuarios/", body);
-    } catch (e1) {
-      const st = e1?.response?.status;
-      if (st !== 404 && st !== 405) {
-        const d = e1?.response?.data;
-        const msg = d?.detail || d?.message || "No se pudo registrar";
-        throw new Error(msg);
-      }
-      // Intento 2
-      try {
-        await api.post("/usuarios/registro", body);
-      } catch (e2) {
-        const d = e2?.response?.data || e1?.response?.data;
-        const msg = d?.detail || d?.message || "No se pudo registrar";
-        throw new Error(msg);
-      }
-    }
-    // Login automático
-    return await loginCtx({ email, username, password });
-  };
-
-  const logout = () => {
-    try {
-      localStorage.removeItem("user");
-      setAuthToken(null);
-    } catch {}
+  const logout = useCallback(() => {
+    clearAuthToken();
+    try { localStorage.removeItem("user"); } catch {}
     setUser(null);
+  }, []);
+
+  const value = {
+    user,
+    setUser,
+    loading,
+    isAuthenticated: !!user,
+    isEmprendedor: hasRole(user, "emprendedor"),
+    isAdmin: hasRole(user, "admin"),
+    refreshUser,
+    logout,
+    setSession: (token, u = null) => {
+      setAuthToken(token);
+      if (u) setUser(u);
+    },
   };
 
-  const value = useMemo(
-    () => ({ user, setUser, loginCtx, registerCtx, logout }),
-    [user]
-  );
-
-  return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
+  return <UserCtx.Provider value={value}>{children}</UserCtx.Provider>;
 }
 
-export function useUser() {
-  return useContext(UserContext);
-}
-
-export default UserContext;
+// ⬇️ export default también, así no tenés que tocar main.jsx
+export default UserProvider;

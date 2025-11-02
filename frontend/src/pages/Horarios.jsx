@@ -1,371 +1,325 @@
 // src/pages/Horarios.jsx
-import { useEffect, useMemo, useState } from "react";
-import api from "../services/api"; // ← ajustá si tu api está en otro lado
+import { useEffect, useState } from "react";
+import api from "../services/api";
+import { useUser } from "../context/UserContext.jsx";
 
-const DIAS = [
-  { value: 0, label: "Domingo" },
-  { value: 1, label: "Lunes" },
-  { value: 2, label: "Martes" },
-  { value: 3, label: "Miércoles" },
-  { value: 4, label: "Jueves" },
-  { value: 5, label: "Viernes" },
-  { value: 6, label: "Sábado" },
+const BTN =
+  "rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700 disabled:opacity-60";
+const BOX =
+  "w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300";
+const LABEL = "block text-xs font-semibold text-sky-700 mb-1";
+
+const DAYS = [
+  { i: 1, name: "Lunes" },
+  { i: 2, name: "Martes" },
+  { i: 3, name: "Miércoles" },
+  { i: 4, name: "Jueves" },
+  { i: 5, name: "Viernes" },
+  { i: 6, name: "Sábado" },
+  { i: 0, name: "Domingo" },
 ];
 
-// Helpers
-const pad2 = (n) => String(n).padStart(2, "0");
-const toHHMM = (v) => {
-  if (!v) return "";
-  if (/^\d{2}:\d{2}$/.test(v)) return v;              // 09:00
-  if (/^\d{2}:\d{2}:\d{2}$/.test(v)) return v.slice(0, 5); // 09:00:00
-  const d = new Date(v);
-  if (!isNaN(d)) return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; // ISO
-  return "";
-};
-const validHHMM = (v) => /^\d{2}:\d{2}$/.test(v);
-const hmToMinutes = (hhmm) => {
-  const [h, m] = String(hhmm).split(":").map(Number);
-  return h * 60 + m;
-};
+function friendly(err) {
+  const s = err?.response?.status;
+  if (s === 401) return "Tu sesión se cerró. Iniciá sesión.";
+  if (s === 403) return "No autorizado.";
+  return err?.response?.data?.detail || err?.message || "No disponible por el momento.";
+}
+
+function hhmm(v) {
+  if (!v) return "09:00";
+  const [h = "09", m = "00"] = String(v).split(":");
+  return `${h.padStart(2, "0")}:${m.padStart(2, "0")}`;
+}
+
+// ==== Normalización desde el backend (GET /horarios/mis) ====
+function normalizeIn(data) {
+  const items = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
+  const grouped = new Map();
+
+  items.forEach((h) => {
+    const d = Number(h.dia_semana);
+    const row = grouped.get(d) || {
+      dia_semana: d,
+      activo: false,
+      intervalo_min: Number(h.intervalo_min ?? h.intervalo ?? 30),
+      bloques: [],
+    };
+    row.activo = row.activo || h.activo !== false;
+    row.intervalo_min = Number(h.intervalo_min ?? h.intervalo ?? row.intervalo_min ?? 30);
+    row.bloques.push({ desde: hhmm(h.desde), hasta: hhmm(h.hasta) });
+    grouped.set(d, row);
+  });
+
+  // Si un día no viene en la respuesta -> inactivo por defecto
+  return DAYS.map((d) =>
+    grouped.get(d.i) || {
+      dia_semana: d.i,
+      activo: false,
+      intervalo_min: 30,
+      bloques: [], // sin bloques => cerrado
+    }
+  );
+}
+
+// ==== Normalización para guardar (POST /horarios/mis) ====
+function normalizeOut(rows) {
+  // Formato agrupado { items: [ { dia_semana, activo, intervalo_min, bloques:[{desde,hasta}] } ] }
+  const items = rows.map((r) => ({
+    dia_semana: Number(r.dia_semana),
+    activo: r.activo !== false,
+    intervalo_min: Number(r.intervalo_min ?? 30),
+    bloques: (r.bloques || []).map((b) => ({
+      desde: hhmm(b.desde),
+      hasta: hhmm(b.hasta),
+    })),
+  }));
+  return { items };
+}
 
 export default function Horarios() {
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState("");
-  const [ok, setOk] = useState("");
-  const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState({
-    dia_semana: 1,
-    hora_desde: "09:00",
-    hora_hasta: "18:00",
-    intervalo_min: "", // ← OPCIONAL
-  });
+  const { user } = useUser() || {};
+  const [rows, setRows] = useState(() =>
+    DAYS.map((d) => ({
+      dia_semana: d.i,
+      activo: false,
+      intervalo_min: 30,
+      bloques: [],
+    }))
+  );
 
-  const resumen = useMemo(() => {
-    const porDia = new Map();
-    for (const h of items) {
-      const d = Number(h.dia_semana);
-      porDia.set(d, (porDia.get(d) || 0) + 1);
-    }
-    return porDia;
-  }, [items]);
+  const [loading, setLoading] = useState(false);
+  const [msg, setMsg] = useState("");
 
-  const normalize = (h) => ({
-    id: h.id,
-    dia_semana: h.dia_semana ?? h.dia ?? h.diaSemana ?? h.diaSemanaNumero ?? 0,
-    hora_desde: toHHMM(h.hora_desde ?? h.desde ?? h.horaInicio ?? h.inicio ?? "09:00"),
-    hora_hasta: toHHMM(h.hora_hasta ?? h.hasta ?? h.horaFin ?? h.fin ?? "18:00"),
-    intervalo_min: h.intervalo_min ?? h.intervalo ?? h.intervaloMinutos ?? "",
-    activo: h.activo ?? true,
-  });
-
-  const tryChain = async (requests) => {
-    let lastErr;
-    for (const fn of requests) {
-      try {
-        return await fn();
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    throw lastErr;
-  };
-
-  async function load() {
-    setLoading(true);
-    setErr("");
-    setOk("");
-    try {
-      let data;
-      try {
-        const r = await api.get("/horarios/mis");
-        data = Array.isArray(r.data) ? r.data : r.data?.items || [];
-      } catch {
-        const r2 = await api.get("/horarios");
-        data = Array.isArray(r2.data) ? r2.data : r2.data?.items || [];
-      }
-      const norm = data.map(normalize).sort(
-        (a, b) =>
-          Number(a.dia_semana) - Number(b.dia_semana) ||
-          hmToMinutes(a.hora_desde) - hmToMinutes(b.hora_desde)
-      );
-      setItems(norm);
-    } catch (e) {
-      setErr(
-        e?.response?.data?.detail ||
-          (e?.response?.status === 401
-            ? "Sesión expirada. Iniciá sesión nuevamente."
-            : "No se pudieron cargar los horarios.")
-      );
-    } finally {
-      setLoading(false);
-    }
-  }
-
+  // ====== Carga inicial ======
   useEffect(() => {
-    load();
+    (async () => {
+      setLoading(true);
+      setMsg("");
+      try {
+        // Garantiza que el usuario tenga emprendedor (opcional; si no, el GET /horarios/mis igual fallaría)
+        try {
+          await api.get("/usuarios/me/emprendedor");
+        } catch {}
+        const { data } = await api.get("/horarios/mis");
+        setRows(normalizeIn(data));
+      } catch (e) {
+        setMsg(friendly(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
-  function onChange(e) {
-    const { name, value } = e.target;
-    setForm((f) => ({
-      ...f,
-      [name]:
-        name === "dia_semana"
-          ? Number(value)
-          : value,
-    }));
-  }
+  // ====== Helpers UI ======
+  const setRow = (idx, patch) =>
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
 
-  // Evita solapamientos en el mismo día (excluyendo el que se edita)
-  function overlaps(dia, desde, hasta, omitId = null) {
-    const a1 = hmToMinutes(desde);
-    const a2 = hmToMinutes(hasta);
-    return items.some((h) => {
-      if (Number(h.dia_semana) !== Number(dia)) return false;
-      if (omitId && h.id === omitId) return false;
-      const b1 = hmToMinutes(h.hora_desde);
-      const b2 = hmToMinutes(h.hora_hasta);
-      return a1 < b2 && b1 < a2; // solape
-    });
-  }
+  const addBlock = (idx) =>
+    setRows((prev) =>
+      prev.map((r, i) =>
+        i === idx
+          ? { ...r, bloques: [...(r.bloques || []), { desde: "09:00", hasta: "12:00" }] }
+          : r
+      )
+    );
 
-  async function createOrUpdate(e) {
-    e.preventDefault();
-    if (saving) return;
+  const removeBlock = (idx, bIdx) =>
+    setRows((prev) =>
+      prev.map((r, i) =>
+        i === idx ? { ...r, bloques: (r.bloques || []).filter((_, j) => j !== bIdx) } : r
+      )
+    );
 
-    setErr("");
-    setOk("");
-
-    const desde = toHHMM(form.hora_desde);
-    const hasta = toHHMM(form.hora_hasta);
-
-    if (!validHHMM(desde) || !validHHMM(hasta)) {
-      setErr("Formato de hora inválido (usar HH:MM).");
-      return;
-    }
-    if (desde >= hasta) {
-      setErr("El horario 'desde' debe ser menor a 'hasta'.");
-      return;
-    }
-    if (overlaps(form.dia_semana, desde, hasta, editing?.id || null)) {
-      setErr("Ese bloque se solapa con otro del mismo día.");
-      return;
-    }
-
-    const intervalo = String(form.intervalo_min || "").trim();
-    const payloadBase = {
-      dia_semana: Number(form.dia_semana),
-      hora_desde: desde,
-      hora_hasta: hasta,
-      ...(intervalo ? { intervalo_min: Number(intervalo) } : {}),
-      // compat:
-      dia: Number(form.dia_semana),
-      desde,
-      hasta,
-      inicio: desde,
-      fin: hasta,
-      ...(intervalo ? { intervalo: Number(intervalo) } : {}),
-    };
-
-    setSaving(true);
-    try {
-      if (editing) {
-        await tryChain([
-          () => api.patch(`/horarios/${editing.id}`, payloadBase),
-          () => api.put(`/horarios/${editing.id}`, payloadBase),
-          () => api.put(`/horarios/update/${editing.id}`, payloadBase),
-        ]);
-        setOk("Horario actualizado.");
-      } else {
-        await tryChain([
-          () => api.post("/horarios", payloadBase),
-          () => api.post("/horarios/", payloadBase),
-        ]);
-        setOk("Horario agregado.");
+  // ====== Validaciones simples antes de guardar ======
+  function validateRows(rs) {
+    for (const r of rs) {
+      if (r.activo && (!r.bloques || r.bloques.length === 0)) {
+        return `En ${DAYS.find((d) => d.i === r.dia_semana)?.name}: agregá al menos un bloque.`;
       }
-      setEditing(null);
-      setForm({
-        dia_semana: 1,
-        hora_desde: "09:00",
-        hora_hasta: "18:00",
-        intervalo_min: "",
-      });
-      await load();
-    } catch (e2) {
-      setErr(e2?.response?.data?.detail || "No se pudo guardar el horario.");
-    } finally {
-      setSaving(false);
+      for (const b of r.bloques || []) {
+        const [h1, m1] = hhmm(b.desde).split(":").map(Number);
+        const [h2, m2] = hhmm(b.hasta).split(":").map(Number);
+        const a = h1 * 60 + m1;
+        const z = h2 * 60 + m2;
+        if (a >= z) {
+          return `En ${DAYS.find((d) => d.i === r.dia_semana)?.name}: la hora "Desde" debe ser menor que "Hasta".`;
+        }
+      }
     }
+    return null;
   }
 
-  async function removeItem(id) {
-    if (!confirm("¿Eliminar horario?")) return;
+  // ====== Guardar ======
+  const onSave = async () => {
+    setLoading(true);
+    setMsg("");
     try {
-      await tryChain([
-        () => api.delete(`/horarios/${id}`),
-        () => api.delete(`/horarios/delete/${id}`),
-      ]);
-      setOk("Horario eliminado.");
-      await load();
+      const v = validateRows(rows);
+      if (v) {
+        setMsg(v);
+        setLoading(false);
+        return;
+      }
+      const payload = normalizeOut(
+        rows.map((r) => ({
+          ...r,
+          // si está inactivo, no mandamos bloques (queda cerrado)
+          bloques: r.activo ? r.bloques : [],
+        }))
+      );
+      await api.post("/horarios/mis", payload);
+      setMsg("Horarios guardados.");
+      // refrescar para ver lo que quedó efectivamente persistido
+      const { data } = await api.get("/horarios/mis");
+      setRows(normalizeIn(data));
     } catch (e) {
-      alert(e?.response?.data?.detail || "No se pudo eliminar.");
+      setMsg(friendly(e));
+    } finally {
+      setLoading(false);
+      setTimeout(() => setMsg(""), 2500);
     }
-  }
-
-  function startEdit(h) {
-    setEditing(h);
-    setForm({
-      dia_semana: Number(h.dia_semana) || 1,
-      hora_desde: toHHMM(h.hora_desde) || "09:00",
-      hora_hasta: toHHMM(h.hora_hasta) || "18:00",
-      intervalo_min: h.intervalo_min ?? "",
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
+  };
 
   return (
     <div className="space-y-4">
-      {/* Encabezado */}
-      <div className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 text-white shadow">
-        <h1 className="text-2xl font-semibold">Horarios</h1>
-        <p className="text-sm opacity-90">Definí días y franjas donde recibís turnos.</p>
-      </div>
-
-      {/* KPIs (cantidad por día) */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-2">
-        {DIAS.map((d) => (
-          <div key={d.value} className="rounded-2xl bg-white shadow-sm border border-slate-200 p-3">
-            <div className="text-xs text-slate-500">{d.label}</div>
-            <div className="text-xl font-semibold text-slate-800">
-              {resumen.get(d.value) || 0}
-            </div>
+      {/* Header coherente con el resto */}
+      <div className="-mx-4 lg:-mx-6 overflow-x-clip">
+        <div className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow">
+          <div className="mx-auto max-w-7xl px-4 lg:px-6">
+            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Horarios</h1>
+            <p className="text-sm md:text-base/relaxed opacity-90">
+              Activá los días laborales y agregá uno o más bloques (por ejemplo, mañana y tarde). Elegí el
+              intervalo para generar turnos dentro de cada bloque.
+            </p>
           </div>
-        ))}
+        </div>
       </div>
 
-      {/* Mensajes */}
-      {err && <div className="rounded-xl border border-rose-200 bg-rose-50 text-rose-700 px-4 py-3">{err}</div>}
-      {ok && <div className="rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-700 px-4 py-3">{ok}</div>}
-
-      {/* Form */}
-      <form onSubmit={createOrUpdate} className="rounded-2xl border border-slate-200 bg-white p-4 md:p-6 shadow-sm grid gap-4">
-        <div className="grid sm:grid-cols-4 gap-3">
-          <label className="block">
-            <span className="text-sm text-slate-700">Día</span>
-            <select
-              name="dia_semana"
-              value={form.dia_semana}
-              onChange={onChange}
-              className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm bg-white"
-            >
-              {DIAS.map((d) => (
-                <option key={d.value} value={d.value}>{d.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <label className="block">
-            <span className="text-sm text-slate-700">Desde</span>
-            <input
-              name="hora_desde"
-              type="time"
-              value={form.hora_desde}
-              onChange={onChange}
-              className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-              required
-            />
-          </label>
-
-          <label className="block">
-            <span className="text-sm text-slate-700">Hasta</span>
-            <input
-              name="hora_hasta"
-              type="time"
-              value={form.hora_hasta}
-              onChange={onChange}
-              className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-              required
-            />
-          </label>
-
-          <label className="block">
-            <span className="text-sm text-slate-700">Intervalo (min) — opcional</span>
-            <input
-              name="intervalo_min"
-              type="number"
-              min={5}
-              step={5}
-              value={form.intervalo_min}
-              onChange={onChange}
-              placeholder="p.ej. 15"
-              className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm"
-            />
-          </label>
-        </div>
-
-        <div className="flex gap-2">
-          <button
-            type="submit"
-            disabled={saving}
-            className="rounded-xl bg-sky-600 text-white px-4 py-2.5 text-sm font-semibold disabled:opacity-60"
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        {msg && (
+          <div
+            className={`mb-4 rounded-xl px-4 py-2 text-sm ${
+              /cerró|error|No se pudo|403|404|405|422|500/i.test(msg)
+                ? "bg-red-50 text-red-700 ring-1 ring-red-200"
+                : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+            }`}
           >
-            {saving ? "Guardando…" : editing ? "Guardar cambios" : "Agregar horario"}
-          </button>
-          {editing && (
-            <button
-              type="button"
-              onClick={() => {
-                setEditing(null);
-                setForm({ dia_semana: 1, hora_desde: "09:00", hora_hasta: "18:00", intervalo_min: "" });
-              }}
-              className="rounded-xl border border-slate-300 text-slate-700 px-4 py-2.5 text-sm font-semibold bg-white"
-            >
-              Cancelar
-            </button>
-          )}
-        </div>
-      </form>
-
-      {/* Lista */}
-      <div className="rounded-2xl border border-slate-200 bg-white p-2 md:p-4 shadow-sm">
-        {loading ? (
-          <div className="p-6 text-slate-500">Cargando…</div>
-        ) : items.length === 0 ? (
-          <div className="p-6 text-slate-500">No hay horarios aún.</div>
-        ) : (
-          <ul className="divide-y divide-slate-100">
-            {items.map((h) => {
-              const dia = DIAS.find((d) => d.value === Number(h.dia_semana))?.label || h.dia_semana;
-              return (
-                <li key={h.id} className="flex items-center justify-between gap-3 p-3">
-                  <div>
-                    <div className="font-medium text-slate-800">{dia}</div>
-                    <div className="text-xs text-slate-500">
-                      {toHHMM(h.hora_desde)} – {toHHMM(h.hora_hasta)}
-                      {h.intervalo_min ? <> · cada {h.intervalo_min} min</> : null}
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => startEdit(h)}
-                      className="rounded-lg px-3 py-1.5 text-sm border border-slate-300 bg-white"
-                    >
-                      Editar
-                    </button>
-                    <button
-                      onClick={() => removeItem(h.id)}
-                      className="rounded-lg px-3 py-1.5 text-sm bg-rose-600 text-white"
-                    >
-                      Eliminar
-                    </button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+            {msg}
+          </div>
         )}
+
+        {/* Dos columnas en escritorio, una en móvil */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {rows.map((r, idx) => {
+            const d = DAYS.find((x) => x.i === r.dia_semana);
+            return (
+              <div key={r.dia_semana} className="rounded-xl border border-slate-200 p-4">
+                {/* Fila superior: nombre del día + interruptor */}
+                <div className="flex items-center justify-between">
+                  <div className="font-medium text-slate-900">{d?.name}</div>
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={r.activo !== false}
+                      onChange={(e) => {
+                        const activo = e.target.checked;
+                        setRow(idx, {
+                          activo,
+                          // si se activa y no hay bloques, agregamos uno por defecto
+                          bloques:
+                            activo && (!r.bloques || r.bloques.length === 0)
+                              ? [{ desde: "09:00", hasta: "13:00" }]
+                              : r.bloques || [],
+                        });
+                      }}
+                    />
+                    <span>Activo</span>
+                  </label>
+                </div>
+
+                {/* Intervalo */}
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className={LABEL}>Intervalo (min)</label>
+                    <input
+                      type="number"
+                      min={5}
+                      step={5}
+                      value={Number(r.intervalo_min ?? 30)}
+                      onChange={(e) =>
+                        setRow(idx, { intervalo_min: Math.max(5, Number(e.target.value) || 30) })
+                      }
+                      className={BOX}
+                    />
+                  </div>
+                </div>
+
+                {/* Bloques (solo si el día está activo) */}
+                {r.activo && (
+                  <div className="mt-3 space-y-2">
+                    <div className="text-xs font-semibold text-slate-700">Bloques</div>
+
+                    {(r.bloques || []).map((b, bIdx) => (
+                      <div key={bIdx} className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className={LABEL}>Desde</label>
+                          <input
+                            type="time"
+                            value={hhmm(b.desde)}
+                            onChange={(e) => {
+                              const bloques = [...(r.bloques || [])];
+                              bloques[bIdx] = { ...bloques[bIdx], desde: e.target.value };
+                              setRow(idx, { bloques });
+                            }}
+                            className={BOX}
+                          />
+                        </div>
+                        <div>
+                          <label className={LABEL}>Hasta</label>
+                          <input
+                            type="time"
+                            value={hhmm(b.hasta)}
+                            onChange={(e) => {
+                              const bloques = [...(r.bloques || [])];
+                              bloques[bIdx] = { ...bloques[bIdx], hasta: e.target.value };
+                              setRow(idx, { bloques });
+                            }}
+                            className={BOX}
+                          />
+                        </div>
+                        <div className="flex items-end">
+                          <button
+                            type="button"
+                            onClick={() => removeBlock(idx, bIdx)}
+                            className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50"
+                          >
+                            Quitar
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+
+                    <button
+                      type="button"
+                      onClick={() => addBlock(idx)}
+                      className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50"
+                    >
+                      Agregar bloque
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Guardar */}
+        <div className="mt-4">
+          <button onClick={onSave} disabled={loading} className={BTN}>
+            {loading ? "Guardando…" : "Guardar horarios"}
+          </button>
+        </div>
       </div>
     </div>
   );

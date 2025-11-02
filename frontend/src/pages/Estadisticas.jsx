@@ -1,5 +1,6 @@
 // src/pages/Estadisticas.jsx
-import { useEffect, useMemo, useState, memo } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useUser } from "../context/UserContext.jsx";
 import api from "../services/api";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
@@ -25,14 +26,26 @@ function toISODate(d) {
   return dt.toISOString().slice(0, 10);
 }
 
-const TIPS = [
-  "Los gráficos por servicio usan solo turnos confirmados del período.",
-  "El ticket promedio = ingresos confirmados / cantidad de confirmados.",
-  "Usá el filtro de fechas para comparar períodos (mes a mes).",
-  "La tabla puede incluir cancelados si activás el switch.",
-];
+// Normaliza roles que pueden venir como string, array de strings u objetos { nombre: "..." }
+function isUserEmprendedor(user) {
+  if (!user) return false;
+  const roles = Array.isArray(user.roles)
+    ? user.roles.map((r) =>
+        typeof r === "string" ? r.toLowerCase() : String(r?.nombre || "").toLowerCase()
+      )
+    : [];
+  const rolCompat = String(user.rol || "").toLowerCase();
+  return (
+    roles.includes("emprendedor") ||
+    rolCompat === "emprendedor" ||
+    !!user.is_emprendedor ||
+    !!user.es_emprendedor
+  );
+}
 
 export default function Estadisticas() {
+  const { user } = useUser();
+
   // Rango por defecto: mes actual
   const now = new Date();
   const defaultDesde = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -45,25 +58,18 @@ export default function Estadisticas() {
   const [turnos, setTurnos] = useState([]);
   const [loading, setLoading] = useState(false);
   const [includeCancelled, setIncludeCancelled] = useState(false);
-  const [errMsg, setErrMsg] = useState("");
 
-  // TIPS (rotan cada 6s sin tocar los datos de gráficos)
-  const [tipIndex, setTipIndex] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => {
-      setTipIndex((i) => (i + 1) % TIPS.length);
-    }, 6000);
-    return () => clearInterval(id);
-  }, []);
+  const emprendedor = isUserEmprendedor(user);
 
   async function loadData() {
+    if (!emprendedor) return; // no cargar nada si no es emprendedor
     setLoading(true);
-    setErrMsg("");
     try {
       const [servRes, turRes] = await Promise.all([
         api.get("/servicios/mis"),
         api.get("/turnos/owner", {
           params: {
+            // el backend acepta ISO; mandamos inicio/fin del día en UTC
             desde: new Date(`${desde}T00:00:00.000Z`).toISOString(),
             hasta: new Date(`${hasta}T23:59:59.999Z`).toISOString(),
           },
@@ -75,8 +81,6 @@ export default function Estadisticas() {
       console.error("Estadísticas: error cargando datos", e);
       setServicios([]);
       setTurnos([]);
-      const msg = e?.response?.data?.detail || "No se pudieron cargar los datos.";
-      setErrMsg(msg);
     } finally {
       setLoading(false);
     }
@@ -85,7 +89,7 @@ export default function Estadisticas() {
   useEffect(() => {
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [emprendedor]);
 
   const onApplyRange = () => loadData();
 
@@ -97,12 +101,12 @@ export default function Estadisticas() {
   }, [servicios]);
 
   // Precio usado en estadísticas (confirmados)
-  const precioTurno = (t) => {
+  function precioTurno(t) {
     const p = t?.precio_aplicado;
     if (typeof p === "number" && p > 0) return p;
     const s = serviciosMap.get(Number(t.servicio_id));
     return s?.precio ?? 0;
-  };
+  }
 
   // Separación por estado
   const confirmados = useMemo(
@@ -117,12 +121,12 @@ export default function Estadisticas() {
   // KPIs
   const ingresosTotales = useMemo(
     () => confirmados.reduce((acc, t) => acc + precioTurno(t), 0),
-    [confirmados, serviciosMap]
+    [confirmados]
   );
   const ticketPromedio = useMemo(() => {
     const c = confirmados.length || 1;
     return Math.round(ingresosTotales / c);
-  }, [ingresosTotales, confirmados.length]);
+  }, [ingresosTotales, confirmados]);
 
   // Agregados por servicio (para cantidad e ingresos)
   const agregadosServicio = useMemo(() => {
@@ -149,101 +153,104 @@ export default function Estadisticas() {
     return m;
   }, [agregadosServicio]);
 
-  // Tortas (memoizadas para evitar parpadeos)
-  const pieCantidad = useMemo(
-    () =>
-      agregadosServicio.map((x) => ({
-        name: x.nombre,
-        value: x.count,
-        color: colorByServicio.get(x.servicio_id),
-      })),
-    [agregadosServicio, colorByServicio]
-  );
-
-  const pieIngresos = useMemo(
-    () =>
-      agregadosServicio.map((x) => ({
-        name: x.nombre,
-        value: x.amount,
-        color: colorByServicio.get(x.servicio_id),
-      })),
-    [agregadosServicio, colorByServicio]
-  );
-
-  const pieEstados = useMemo(
-    () => [
-      { name: "Confirmados", value: confirmados.length, color: "#16a34a" }, // green-600
-      { name: "Cancelados", value: cancelados.length, color: "#94a3b8" }, // slate-400
-    ],
-    [confirmados.length, cancelados.length]
-  );
-
-  // Tabla (paginada) + opción incluir cancelados
-  const baseTabla = useMemo(
-    () => (includeCancelled ? turnos : confirmados),
-    [includeCancelled, turnos, confirmados]
-  );
-  const tablaOrdenada = useMemo(
-    () => [...baseTabla].sort((a, b) => new Date(a.inicio) - new Date(b.inicio)),
-    [baseTabla]
-  );
-  const tablaTurnos = useMemo(
-    () =>
-      tablaOrdenada.map((t) => {
-        const d = new Date(t.inicio || t.desde || t.datetime);
-        const svc = serviciosMap.get(Number(t.servicio_id));
-        return {
-          id: t.id,
-          fecha: isNaN(d) ? "—" : format(d, "dd/MM/yyyy", { locale: es }),
-          hora: isNaN(d) ? "—" : format(d, "HH:mm"),
-          cliente: t.cliente_nombre || t?.cliente?.nombre || "—",
-          servicio: svc?.nombre || "Servicio",
-          precio: precioTurno(t),
-          estado: t.estado || "confirmado",
-        };
-      }),
-    [tablaOrdenada, serviciosMap]
-  );
-
-  // Paginación de la tabla
-  const [page, setPage] = useState(1);
-  const [perPage, setPerPage] = useState(10);
-  useEffect(() => { setPage(1); }, [desde, hasta, includeCancelled]); // reset al cambiar filtros
-
-  const totalItems = tablaTurnos.length;
-  const totalPages = Math.max(1, Math.ceil(totalItems / perPage));
-  const paginatedRows = useMemo(() => {
-    const start = (page - 1) * perPage;
-    return tablaTurnos.slice(start, start + perPage);
-  }, [tablaTurnos, page, perPage]);
-
+  // Tortas
+  const pieCantidad = agregadosServicio.map((x) => ({
+    name: x.nombre,
+    value: x.count,
+    color: colorByServicio.get(x.servicio_id),
+  }));
+  const pieIngresos = agregadosServicio.map((x) => ({
+    name: x.nombre,
+    value: x.amount,
+    color: colorByServicio.get(x.servicio_id),
+  }));
   const totalConfirmados = confirmados.length || 1;
+
+  const pieEstados = [
+    { name: "Confirmados", value: confirmados.length, color: "#16a34a" }, // green-600
+    { name: "Cancelados", value: cancelados.length, color: "#94a3b8" },   // slate-400
+  ];
+
+  // Tabla
+  const tablaTurnos = useMemo(() => {
+    const base = includeCancelled ? turnos : confirmados;
+    const sorted = [...base].sort((a, b) => new Date(a.inicio) - new Date(b.inicio));
+    return sorted.map((t) => {
+      const d = new Date(t.inicio || t.desde || t.datetime);
+      const svc = serviciosMap.get(Number(t.servicio_id));
+      return {
+        id: t.id,
+        fecha: isNaN(d) ? "—" : format(d, "dd/MM/yyyy", { locale: es }),
+        hora: isNaN(d) ? "—" : format(d, "HH:mm"),
+        cliente: t.cliente_nombre || t?.cliente?.nombre || "—",
+        servicio: svc?.nombre || "Servicio",
+        precio: precioTurno(t),
+        estado: t.estado || "confirmado",
+      };
+    });
+  }, [turnos, confirmados, includeCancelled, serviciosMap]);
+
+  // ---------- UI ----------
+  // Encabezado consistente
+  const Header = ({ title, subtitle, childrenRight = null }) => (
+    <header className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow mx-4 mt-4">
+      <div className="mx-auto max-w-6xl">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold">{title}</h1>
+            {subtitle && (
+              <p className="text-sm md:text-base/relaxed opacity-90">{subtitle}</p>
+            )}
+          </div>
+          {childrenRight}
+        </div>
+      </div>
+    </header>
+  );
+
+  // Si NO es emprendedor → cartel informativo y CTA
+  if (!emprendedor) {
+    return (
+      <div className="min-h-[100dvh] flex flex-col">
+        <Header
+          title="Estadísticas"
+          subtitle="Panel disponible sólo para cuentas de Emprendedor."
+        />
+        <main className="mx-auto w-full max-w-6xl px-4 py-6 space-y-6">
+          <section className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+            <h3 className="text-base font-semibold text-slate-900">Acceso restringido</h3>
+            <p className="mt-1 text-sm text-slate-600">
+              Para ver tus estadísticas activá tu plan de <b>Emprendedor</b>.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-3">
+              <a
+                href="/perfil"
+                className="rounded-xl bg-sky-600 text-white px-4 py-2 text-sm font-semibold shadow hover:bg-sky-700"
+              >
+                Ir a Perfil
+              </a>
+              <a
+                href="/"
+                className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-semibold hover:bg-slate-50"
+              >
+                Volver al inicio
+              </a>
+            </div>
+          </section>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-[100dvh] flex flex-col">
-      {/* Encabezado */}
-      <header className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow mx-4 mt-4">
-        <div className="mx-auto max-w-6xl">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h1 className="text-2xl font-semibold">Estadísticas</h1>
-              <p className="text-sm md:text-base/relaxed opacity-90">
-                Desempeño, distribución por servicio e ingresos del período.
-              </p>
-            </div>
-            
-          </div>
-        </div>
-      </header>
+      {/* Encabezado (igual al resto): gradiente + texto blanco */}
+      <Header
+        title="Estadísticas"
+        subtitle="Desempeño, distribución por servicio e ingresos del período."
+      />
 
       <main className="mx-auto w-full max-w-6xl px-4 py-6 space-y-6">
-        {/* Mensaje de error (si lo hay) */}
-        {errMsg && (
-          <div className="rounded-xl bg-rose-50 text-rose-700 ring-1 ring-rose-200 px-4 py-2 text-sm">
-            {errMsg}
-          </div>
-        )}
-
         {/* Filtros */}
         <section className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
           <div className="flex flex-col md:flex-row md:items-end gap-4">
@@ -265,7 +272,7 @@ export default function Estadisticas() {
                 onChange={(e) => setHasta(e.target.value)}
               />
             </div>
-            <div className="flex items-end gap-2">
+            <div className="flex items-end">
               <button
                 onClick={onApplyRange}
                 disabled={loading}
@@ -273,21 +280,8 @@ export default function Estadisticas() {
               >
                 {loading ? "Cargando..." : "Aplicar"}
               </button>
-              <label className="flex items-center gap-2 text-sm text-slate-700 ml-2">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 rounded border-slate-300"
-                  checked={includeCancelled}
-                  onChange={(e) => setIncludeCancelled(e.target.checked)}
-                />
-                Incluir cancelados (tabla)
-              </label>
             </div>
-            
-          </div><div className="bg-white/10 rounded-xl px-3 py-2 text-sm">
-              <span className="opacity-80">Tip: </span>
-              <span className="font-medium">{TIPS[tipIndex]}</span>
-            </div>
+          </div>
         </section>
 
         {/* KPIs */}
@@ -300,48 +294,47 @@ export default function Estadisticas() {
 
         {/* Gráficos de torta + leyenda externa */}
         <section className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-4">
+          {/* Cantidad por servicio */}
           <Card title="Cantidad por servicio" subtitle={`${confirmados.length} turnos`}>
             <Donut data={pieCantidad} />
           </Card>
 
+          {/* Ingresos por servicio */}
           <Card title="Ingresos por servicio" subtitle={currency.format(ingresosTotales)}>
             <Donut data={pieIngresos} />
           </Card>
 
+          {/* Estados */}
           <Card title="Estados de turnos" subtitle={`${confirmados.length + cancelados.length} totales`}>
             <Donut data={pieEstados} />
           </Card>
 
-          {/* Leyenda de servicios (tarjetitas) */}
+          {/* Leyenda de servicios (externa) */}
           <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
-            <h3 className="text-base font-semibold text-slate-900 mb-2">
-              Servicios
-            </h3>
+            <h3 className="text-base font-semibold text-slate-900 mb-2">Servicios (leyenda)</h3>
             {pieCantidad.length === 0 ? (
               <p className="text-sm text-slate-500">Sin datos en el período.</p>
             ) : (
-              <ul className="grid grid-cols-1 sm:grid-cols-1 gap-2">
+              <ul className="grid grid-cols-1 gap-2">
                 {agregadosServicio.map((s, idx) => {
                   const pct = Math.round((s.count / (totalConfirmados || 1)) * 100);
+                  const color = PALETTE[idx % PALETTE.length];
                   return (
                     <li
                       key={s.servicio_id + "-" + idx}
-                      className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2"
+                      className="w-full flex items-start justify-between rounded-xl border border-slate-200 px-3 py-2"
                     >
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <span
-                          className="inline-block h-3 w-3 rounded-full flex-shrink-0"
-                          style={{ background: PALETTE[idx % PALETTE.length] }}
-                        />
-                        <span className="text-sm text-slate-800 break-words">
-                          {s.nombre}
-                        </span>
+                      <div className="flex items-start gap-2 min-w-0 flex-1">
+                        <span className="mt-1 inline-block h-3 w-3 rounded-full" style={{ background: color }} />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm text-slate-800 leading-snug break-words whitespace-normal">
+                            {s.nombre}
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex items-center gap-3 pl-3">
-                        <span className="text-xs text-slate-500">{pct}%</span>
-                        <span className="text-xs font-medium text-slate-700">
-                          {s.count}
-                        </span>
+                      <div className="flex items-center gap-3 shrink-0 pl-3">
+                        <span className="text-xs text-slate-500 tabular-nums">{pct}%</span>
+                        <span className="text-xs font-medium text-slate-700 tabular-nums">{s.count}</span>
                       </div>
                     </li>
                   );
@@ -351,22 +344,19 @@ export default function Estadisticas() {
           </div>
         </section>
 
-        {/* Historial (tabla paginada) */}
+        {/* Historial */}
         <section className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-base font-semibold text-slate-900">
-              Historial del período
-            </h3>
-            <div className="flex items-center gap-2">
-              <label className="text-sm text-slate-600">Por página</label>
-              <select
-                className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-sm"
-                value={perPage}
-                onChange={(e) => { setPerPage(Number(e.target.value)); setPage(1); }}
-              >
-                {[10, 20, 30, 50].map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
-            </div>
+            <h3 className="text-base font-semibold text-slate-900">Historial del período</h3>
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                className="h-4 w-4 rounded border-slate-300"
+                checked={includeCancelled}
+                onChange={(e) => setIncludeCancelled(e.target.checked)}
+              />
+              Incluir cancelados
+            </label>
           </div>
 
           <div className="overflow-x-auto">
@@ -382,20 +372,20 @@ export default function Estadisticas() {
                 </tr>
               </thead>
               <tbody>
-                {paginatedRows.length === 0 ? (
+                {tablaTurnos.length === 0 ? (
                   <tr>
                     <td colSpan="6" className="py-6 text-center text-slate-500">
                       Sin turnos en el período seleccionado.
                     </td>
                   </tr>
                 ) : (
-                  paginatedRows.map((r) => (
+                  tablaTurnos.map((r) => (
                     <tr key={r.id} className="border-t border-slate-100">
                       <td className="py-2 pr-4 text-slate-800">{r.fecha}</td>
                       <td className="py-2 pr-4 text-slate-800">{r.hora}</td>
                       <td className="py-2 pr-4 text-slate-800">{r.cliente}</td>
                       <td className="py-2 pr-4 text-slate-800">{r.servicio}</td>
-                      <td className="py-2 pr-4 text-slate-800">
+                      <td className="py-2 pr-4">
                         {r.estado === "cancelado" ? "—" : currency.format(r.precio || 0)}
                       </td>
                       <td className="py-2 pr-4">
@@ -416,37 +406,22 @@ export default function Estadisticas() {
               </tbody>
             </table>
           </div>
+        </section>
 
-          {/* Paginación */}
-          <div className="mt-4 flex items-center justify-between">
-            <div className="text-sm text-slate-600">
-              Mostrando {paginatedRows.length} de {totalItems}
-            </div>
-            <div className="flex items-center gap-1">
-              <button
-                className="btn-plain"
-                disabled={page <= 1}
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-              >
-                Anterior
-              </button>
-              <span className="px-2 text-sm">Página {page} / {totalPages}</span>
-              <button
-                className="btn-plain"
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              >
-                Siguiente
-              </button>
-            </div>
-          </div>
+        {/* Recomendaciones */}
+        <section className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
+          <h3 className="text-base font-semibold text-slate-900 mb-2">Recomendaciones</h3>
+          <ul className="list-disc pl-5 text-sm text-slate-700 space-y-1">
+            <li><strong>Ticket promedio</strong> = promedio cobrado por turno confirmado del período.</li>
+            <li>Los gráficos por servicio usan sólo confirmados. El de <em>Estados</em> incluye cancelados.</li>
+            <li>Si tus precios vienen en centavos desde el back, avisame y lo ajusto (dividir por 100).</li>
+          </ul>
         </section>
       </main>
     </div>
   );
 }
 
-// ---------- UI Helpers ----------
 function Card({ title, subtitle, children }) {
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
@@ -461,8 +436,7 @@ function Card({ title, subtitle, children }) {
   );
 }
 
-// Donut SIN parpadeo: memo + animación off por defecto
-const Donut = memo(function Donut({ data, animate = false }) {
+function Donut({ data }) {
   return (
     <ResponsiveContainer width="100%" height="100%">
       <PieChart>
@@ -473,9 +447,8 @@ const Donut = memo(function Donut({ data, animate = false }) {
           innerRadius="55%"
           outerRadius="85%"
           paddingAngle={2}
+          isAnimationActive
           labelLine={false}
-          isAnimationActive={animate}
-          animationDuration={300}
           label={({ percent }) => `${Math.round((percent || 0) * 100)}%`}
         >
           {data.map((entry, idx) => (
@@ -489,7 +462,7 @@ const Donut = memo(function Donut({ data, animate = false }) {
       </PieChart>
     </ResponsiveContainer>
   );
-});
+}
 
 function KPI({ title, value }) {
   return (

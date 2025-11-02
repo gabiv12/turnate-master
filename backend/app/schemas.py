@@ -1,165 +1,111 @@
-# app/schemas.py
-from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, EmailStr, ConfigDict
+from datetime import datetime
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
-# =========================
-# USUARIOS
-# =========================
-class UsuarioOut(BaseModel):
+# ===== Usuario =====
+class UsuarioBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     username: str
-    email: Optional[EmailStr] = None
-    nombre: Optional[str] = ""
+    email: EmailStr
+    nombre: Optional[str] = None
+    rol: str
 
-class UsuarioUpdate(BaseModel):
-    nombre: str = Field(min_length=1)
+class UsuarioCreate(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=4)
+    username: Optional[str] = None
+    nombre: Optional[str] = None
 
-class PasswordChangeIn(BaseModel):
-    actual: str = Field(min_length=1)
-    nueva: str = Field(min_length=6)
+class UsuarioLogin(BaseModel):
+    identity: str  # username o email
+    password: str
 
+class UsuarioUpdateMe(BaseModel):
+    nombre: Optional[str] = None
+    apellido: Optional[str] = None
+    dni: Optional[str] = None
 
-# =========================
-# EMPRENDEDORES
-# =========================
-class EmprendedorOut(BaseModel):
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UsuarioBase
+
+# ===== Emprendedor =====
+class EmprendedorBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
-    user_id: int
-    # compat viejo front:
-    usuario_id: Optional[int] = None
+    usuario_id: int
+    nombre: str
+    descripcion: Optional[str] = None
+    codigo_cliente: Optional[str] = None
+    telefono: Optional[str] = None
+    direccion: Optional[str] = None
+    email_contacto: Optional[str] = None
+    rubro: Optional[str] = None
+    web: Optional[str] = None
+    redes: Optional[str] = None
+    cuit: Optional[str] = None
+    activo: bool
 
-    nombre: Optional[str] = ""
-    telefono_contacto: Optional[str] = ""
-    direccion: Optional[str] = ""
-    rubro: Optional[str] = ""
-    descripcion: Optional[str] = ""
-    codigo_cliente: Optional[str] = ""
-    redes: Optional[str] = ""
-    logo_url: Optional[str] = ""
-    created_at: Optional[datetime] = None
+class EmprendedorCreate(BaseModel):
+    nombre: str
+    descripcion: Optional[str] = None
 
 class EmprendedorUpdate(BaseModel):
     nombre: Optional[str] = None
-    telefono_contacto: Optional[str] = None
-    direccion: Optional[str] = None
-    rubro: Optional[str] = None
     descripcion: Optional[str] = None
+    telefono: Optional[str] = None
+    direccion: Optional[str] = None
+    email_contacto: Optional[str] = None
+    rubro: Optional[str] = None
+    web: Optional[str] = None
     redes: Optional[str] = None
-    logo_url: Optional[str] = None
-
-
-# =========================
-# SERVICIOS
-# =========================
-class ServicioBase(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    nombre: str = Field(min_length=1)
-    duracion_min: int = Field(ge=5, le=600)
-    precio: int = Field(ge=0)
-
-class ServicioCreate(ServicioBase):
-    pass
-
-class ServicioUpdate(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    nombre: Optional[str] = None
-    duracion_min: Optional[int] = Field(default=None, ge=5, le=600)
-    precio: Optional[int] = Field(default=None, ge=0)
-
-class ServicioOut(ServicioBase):
-    id: int
-
-
-# =========================
-# HORARIOS  (compat en imports)
-# =========================
-class HorarioBase(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    dia_semana: int = Field(ge=0, le=6)  # 0=lunes ... 6=domingo
-    hora_desde: str  # "HH:MM"
-    hora_hasta: str  # "HH:MM"
-    intervalo_min: int = Field(ge=5, le=600)
-    activo: bool = True
-
-class HorarioCreate(HorarioBase):
-    pass
-
-class HorarioUpdate(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    dia_semana: Optional[int] = Field(default=None, ge=0, le=6)
-    hora_desde: Optional[str] = None
-    hora_hasta: Optional[str] = None
-    intervalo_min: Optional[int] = Field(default=None, ge=5, le=600)
+    cuit: Optional[str] = None
     activo: Optional[bool] = None
 
-class HorarioOut(HorarioBase):
+class ActivacionEmprendedorOut(BaseModel):
+    message: str
+    emprendedor: EmprendedorBase
+
+# ===== Servicio / Horario mínimos para público =====
+class ServicioOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    nombre: str
+    duracion_min: int
+    activo: bool
+
+class HorarioOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    dia_semana: int
+    hora_desde: str
+    hora_hasta: str
+    intervalo_min: int
+    activo: bool
+
+# ===== Turnos =====
+class TurnoCreate(BaseModel):
+    emprendedor_id: int
+    servicio_id: int
+    inicio: datetime  # naive
+    cliente_nombre: str
+    cliente_contacto: str
+    notas: Optional[str] = None
+
+class TurnoOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
     id: int
     emprendedor_id: int
-
-
-# =========================
-# TURNOS  (lo que falta para app/routers/turnos.py)
-# =========================
-class TurnoOut(BaseModel):
-    """
-    Respuesta de un turno para listados / detalle.
-    Incluye nombres compatibles que usa tu front:
-    - inicio / fin (datetime ISO)
-    - desde / hasta (aliases opcionales por compat)
-    - estado, precio, cliente_nombre / cliente_contacto
-    - servicio_id, emprendedor_id, servicio_nombre (si el query los trae)
-    """
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    inicio: Optional[datetime] = None
-    fin: Optional[datetime] = None
-
-    # aliases de compatibilidad (algunos front usan desde/hasta)
-    desde: Optional[datetime] = None
-    hasta: Optional[datetime] = None
-
-    estado: Optional[str] = "confirmado"
-    precio: Optional[int] = 0
-
-    cliente_nombre: Optional[str] = ""
-    cliente_contacto: Optional[str] = ""
-
-    servicio_id: Optional[int] = None
-    emprendedor_id: Optional[int] = None
-
-    # opcional si en el query haces join
-    servicio_nombre: Optional[str] = None
-
-class TurnoCompatCreate(BaseModel):
-    """
-    Payload de creación con compatibilidad flexible.
-    Tu back suele necesitar: servicio_id + inicio (datetime).
-    Campos de cliente y precio son opcionales.
-    """
-    model_config = ConfigDict(from_attributes=True)
-
-    servicio_id: int = Field(ge=1)
+    servicio_id: int
     inicio: datetime
+    fin: datetime
+    cliente_nombre: str
+    cliente_contacto: str
+    notas: Optional[str] = None
+    estado: str
 
-    # opcionales / compat
-    fin: Optional[datetime] = None
-    precio: Optional[int] = Field(default=0, ge=0)
-    cliente_nombre: Optional[str] = ""
-    cliente_contacto: Optional[str] = ""
-
-class TurnoUpdate(BaseModel):
-    """
-    Actualización parcial del turno.
-    """
-    model_config = ConfigDict(from_attributes=True)
-
-    estado: Optional[str] = None
-    precio: Optional[int] = Field(default=None, ge=0)
-    inicio: Optional[datetime] = None
-    fin: Optional[datetime] = None
-    cliente_nombre: Optional[str] = None
-    cliente_contacto: Optional[str] = None
+# ===== Agenda pública =====
+class AgendaOut(BaseModel):
+    slots: List[datetime]

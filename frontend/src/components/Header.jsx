@@ -2,8 +2,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useUser } from "../context/UserContext.jsx";
+import { getAuthToken, clearAuthToken } from "../services/api";
+import { logout as authLogout } from "../services/auth";
 
 const LOGO_SRC = "/images/TurnateLogo.png";
+
 const linkBase = "px-5 py-2.5 rounded-full text-base font-medium transition-colors duration-150";
 const navClass = ({ isActive }) =>
   isActive
@@ -14,86 +17,146 @@ function Icon({ name, className = "w-4 h-4" }) {
   const common = { fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" };
   switch (name) {
     case "reservar":
-      return (<svg viewBox="0 0 24 24" className={className} {...common}><path d="M4 7h16v4a2 2 0 0 1 0 2v4H4v-4a2 2 0 0 1 0-2V7z"/><path d="M8 7v10M16 7v10"/></svg>);
+      return (
+        <svg viewBox="0 0 24 24" className={className} {...common}>
+          <path d="M4 7h16v4a2 2 0 0 1 0 2v4H4v-4a2 2 0 0 1 0-2V7z" />
+          <path d="M8 7v10M16 7v10" />
+        </svg>
+      );
     case "turnos":
-      return (<svg viewBox="0 0 24 24" className={className} {...common}><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>);
+      return (
+        <svg viewBox="0 0 24 24" className={className} {...common}>
+          <rect x="3" y="4" width="18" height="18" rx="2" />
+          <path d="M16 2v4M8 2v4M3 10h18" />
+        </svg>
+      );
     case "perfil":
-      return (<svg viewBox="0 0 24 24" className={className} {...common}><path d="M20 21a8 8 0 1 0-16 0"/><circle cx="12" cy="7" r="4"/></svg>);
+      return (
+        <svg viewBox="0 0 24 24" className={className} {...common}>
+          <path d="M20 21a8 8 0 1 0-16 0" />
+          <circle cx="12" cy="7" r="4" />
+        </svg>
+      );
     case "emprendimiento":
-      return (<svg viewBox="0 0 24 24" className={className} {...common}><path d="M3 7h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>);
+      return (
+        <svg viewBox="0 0 24 24" className={className} {...common}>
+          <path d="M3 7h18v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+          <path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+        </svg>
+      );
     case "logout":
-      return (<svg viewBox="0 0 24 24" className={className} {...common}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>);
-    default: return null;
+      return (
+        <svg viewBox="0 0 24 24" className={className} {...common}>
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+          <path d="M16 17l5-5-5-5" />
+          <path d="M21 12H9" />
+        </svg>
+      );
+    default:
+      return null;
   }
 }
 
+// ---- Helpers de lógica (no cambian el diseño) ----
+function normalizeRoles(rolesAny, rolCompat) {
+  const out = new Set();
+  if (Array.isArray(rolesAny)) {
+    for (const r of rolesAny) {
+      if (typeof r === "string" && r) out.add(r.toLowerCase());
+      else if (r && typeof r === "object" && r.nombre) out.add(String(r.nombre).toLowerCase());
+    }
+  }
+  if (rolCompat) out.add(String(rolCompat).toLowerCase());
+  return Array.from(out);
+}
+
 export default function Header() {
-  const { user, token, setUser, logout } = useUser() || {};
+  // Del contexto tomamos solo lo que realmente existe
+  const { user, setUser, isAuthenticated, isEmprendedor, refreshMe } = useUser() || {};
   const [openAvatarMenu, setOpenAvatarMenu] = useState(false);
+
   const avatarBtnRef = useRef(null);
   const avatarMenuRef = useRef(null);
   const navigate = useNavigate();
 
+  // Si hay token persistido pero aún no hay user en memoria, hidratamos /me
   useEffect(() => {
-    try {
-      const storedToken = localStorage.getItem("accessToken");
-      const rawUser = localStorage.getItem("user");
-      if (storedToken && rawUser && !user?.id) {
-        const u = JSON.parse(rawUser);
-        if (u?.id) setUser?.(u);
-      }
-    } catch {}
-  }, [user, setUser]);
+    const t = getAuthToken();
+    if (t && !user) {
+      // no bloquea la UI; cuando resuelva, Header re-renderiza
+      refreshMe?.();
+    }
+  }, [user, refreshMe]);
 
-  const isAuth = !!(token || localStorage.getItem("accessToken"));
-  const rol = String(user?.rol || "").toLowerCase();
-  const isEmprendedor = rol === "emprendedor" || !!user?.es_emprendedor;
-  const isAdmin = user && (Number(user.id) === 1 || rol === "admin");
+  // isAuth verdadero si el contexto dice autenticado o si al menos hay token guardado
+  const isAuth = !!isAuthenticated || !!getAuthToken();
+
+  // Roles (compatibilidad con estructuras antiguas)
+  const roles = normalizeRoles(user?.roles, user?.rol);
+  const isAdmin = roles.includes("admin") || (!!user && Number(user.id) === 1);
+  // isEmprendedor ya viene del contexto; mantenemos compat por si user trae flags antiguos:
+  const isEmp = isEmprendedor || !!(user?.es_emprendedor || user?.is_emprendedor);
 
   useEffect(() => {
     const onDoc = (e) => {
-      if (openAvatarMenu && avatarMenuRef.current && !avatarMenuRef.current.contains(e.target) &&
-          avatarBtnRef.current && !avatarBtnRef.current.contains(e.target)) {
+      if (
+        openAvatarMenu &&
+        avatarMenuRef.current &&
+        !avatarMenuRef.current.contains(e.target) &&
+        avatarBtnRef.current &&
+        !avatarBtnRef.current.contains(e.target)
+      ) {
         setOpenAvatarMenu(false);
       }
     };
-    const onKey = (e) => { if (e.key === "Escape") setOpenAvatarMenu(false); };
+    const onKey = (e) => {
+      if (e.key === "Escape") setOpenAvatarMenu(false);
+    };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
-    return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onKey); };
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [openAvatarMenu]);
 
   const handleLogout = () => {
-    try { logout?.(); } catch {}
-    try { localStorage.removeItem("accessToken"); localStorage.removeItem("user"); } catch {}
+    try { authLogout(); } catch {}
+    try {
+      clearAuthToken();
+      // limpieza de llaves viejas por compat
+      localStorage.removeItem("accessToken");
+      localStorage.removeItem("user");
+    } catch {}
+    setUser?.(null);
     setOpenAvatarMenu(false);
     navigate("/login", { replace: true });
   };
 
   const displayName = user?.nombre || user?.username || user?.email || "Usuario";
   const initial = (displayName?.[0] || "U").toUpperCase();
-  const avatarUrl = user?.avatar_url; // <- viene del Perfil.jsx después de subir la foto
 
   return (
     <header className="bg-gradient-to-r from-blue-600 to-cyan-400 shadow-lg fixed inset-x-0 top-0 z-50">
-      <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-10 py-5 md:py-6 flex items-center justify-between">
-        {/* Logo y marca (más grande) */}
+      <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-10 py-4 md:py-5 flex items-center justify-between">
+        {/* Logo */}
         <Link to="/" className="flex items-center gap-3">
           <img
             src={LOGO_SRC}
             alt="Turnate"
-            className="h-12 w-auto select-none"
+            className="h-11 w-auto select-none"
             draggable="false"
             onError={(e) => { e.currentTarget.style.display = "none"; }}
           />
-          <span className="font-extrabold text-3xl text-white tracking-tight drop-shadow">Turnate</span>
+          <span className="font-extrabold text-2xl text-white tracking-tight">Turnate</span>
         </Link>
 
-        {/* Navegación principal */}
+        {/* Navegación principal (mismo markup/clases) */}
         <nav className="flex items-center gap-3">
           <NavLink to="/" end className={navClass}>Inicio</NavLink>
           <NavLink to="/nosotros" end className={navClass}>Nosotros</NavLink>
 
+          {/* Reportes solo Admin */}
           {isAuth && isAdmin && (
             <NavLink to="/admin" end className={navClass}>Reportes</NavLink>
           )}
@@ -113,46 +176,38 @@ export default function Header() {
                 aria-expanded={openAvatarMenu}
                 title="Menú de usuario"
               >
-                {/* Avatar real si existe, si no inicial */}
-                {avatarUrl ? (
-                  <img
-                    src={avatarUrl}
-                    alt="Avatar"
-                    className="w-11 h-11 rounded-full object-cover ring-2 ring-white/70 shadow"
-                    onError={(e) => { e.currentTarget.style.display = "none"; }}
-                  />
-                ) : (
-                  <div className="w-11 h-11 grid place-items-center rounded-full text-white font-semibold border border-white/50 bg-white/10 backdrop-blur-sm">
-                    {initial}
-                  </div>
-                )}
+                <div className="w-10 h-10 grid place-items-center rounded-full text-white font-semibold border border-white/50 bg-white/10 backdrop-blur-sm">
+                  {initial}
+                </div>
               </button>
 
               {openAvatarMenu && (
                 <div
                   ref={avatarMenuRef}
-                  className="absolute right-0 mt-3 w-80 rounded-2xl bg-white shadow-xl ring-1 ring-black/5 overflow-hidden origin-top-right animate-[menuIn_120ms_ease-out]"
+                  className="absolute right-0 mt-3 w-72 rounded-2xl bg-white shadow-xl ring-1 ring-black/5 overflow-hidden origin-top-right animate-[menuIn_120ms_ease-out]"
                   role="menu"
                   style={{ transformOrigin: "top right" }}
                 >
-                  <div className="px-4 py-4 bg-gradient-to-r from-slate-50 to-white border-b">
+                  <div className="px-4 py-3 bg-gradient-to-r from-slate-50 to-white border-b">
                     <p className="text-[11px] uppercase tracking-wide text-slate-500">Sesión iniciada</p>
-                    <div className="mt-2 flex items-center gap-3">
-                      {avatarUrl ? (
-                        <img src={avatarUrl} alt="Avatar" className="w-9 h-9 rounded-full object-cover ring-1 ring-slate-200" />
-                      ) : (
-                        <div className="w-9 h-9 grid place-items-center rounded-full bg-slate-100 text-slate-700 text-sm font-semibold">
-                          {initial}
-                        </div>
-                      )}
+                    <div className="mt-1 flex items-center gap-2">
+                      <div className="w-8 h-8 grid place-items-center rounded-full bg-slate-100 text-slate-700 text-sm font-semibold">
+                        {initial}
+                      </div>
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-slate-900 truncate">{displayName}</p>
                         {isAdmin ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] px-2 py-[2px] rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200">Administrador</span>
-                        ) : isEmprendedor ? (
-                          <span className="inline-flex items-center gap-1 text-[11px] px-2 py-[2px] rounded-full bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">Emprendedor</span>
+                          <span className="inline-flex items-center gap-1 text-[11px] px-2 py-[2px] rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200">
+                            Administrador
+                          </span>
+                        ) : isEmp ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] px-2 py-[2px] rounded-full bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">
+                            Emprendedor
+                          </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 text-[11px] px-2 py-[2px] rounded-full bg-blue-50 text-blue-700 ring-1 ring-blue-200">Cliente</span>
+                          <span className="inline-flex items-center gap-1 text-[11px] px-2 py-[2px] rounded-full bg-blue-50 text-blue-700 ring-1 ring-blue-200">
+                            Cliente
+                          </span>
                         )}
                       </div>
                     </div>
@@ -161,30 +216,35 @@ export default function Header() {
                   <ul className="py-1 text-sm">
                     <li>
                       <NavLink to="/reservar" end className="flex items-center gap-2 px-4 py-2.5 hover:bg-slate-50" onClick={() => setOpenAvatarMenu(false)}>
-                        <Icon name="reservar" /><span>Reservar</span>
+                        <Icon name="reservar" />
+                        <span>Reservar</span>
                       </NavLink>
                     </li>
                     <li>
                       <NavLink to="/turnos" end className="flex items-center gap-2 px-4 py-2.5 hover:bg-slate-50" onClick={() => setOpenAvatarMenu(false)}>
-                        <Icon name="turnos" /><span>Turnos</span>
+                        <Icon name="turnos" />
+                        <span>Turnos</span>
                       </NavLink>
                     </li>
                     <li>
                       <NavLink to="/perfil" end className="flex items-center gap-2 px-4 py-2.5 hover:bg-slate-50" onClick={() => setOpenAvatarMenu(false)}>
-                        <Icon name="perfil" /><span>Perfil</span>
+                        <Icon name="perfil" />
+                        <span>Perfil</span>
                       </NavLink>
                     </li>
-                    {isEmprendedor && (
+                    {isEmp && (
                       <li>
                         <NavLink to="/emprendimiento" end className="flex items-center gap-2 px-4 py-2.5 hover:bg-slate-50" onClick={() => setOpenAvatarMenu(false)}>
-                          <Icon name="emprendimiento" /><span>Emprendimiento</span>
+                          <Icon name="emprendimiento" />
+                          <span>Emprendimiento</span>
                         </NavLink>
                       </li>
                     )}
                     <li className="my-1 border-t" />
                     <li>
                       <button className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-slate-50 text-left text-rose-600" onClick={handleLogout}>
-                        <Icon name="logout" /><span>Cerrar sesión</span>
+                        <Icon name="logout" />
+                        <span>Cerrar sesión</span>
                       </button>
                     </li>
                   </ul>
