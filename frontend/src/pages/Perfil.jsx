@@ -3,7 +3,9 @@ import React, { useEffect, useRef, useState } from "react";
 import api from "../services/api";
 import Button from "../components/Button";
 import Input from "../components/Input";
-import { useUser } from "../context/UserContext.jsx"; // si no existe, no rompe: sólo lo usamos para refresh
+import { useUser } from "../context/UserContext.jsx";
+import { getAuthToken, setUser as lsSetUser } from "../services/api";
+import { updatePerfilSmart } from "../services/usuarios"; // ⬅️ usamos el helper
 
 const LABEL = "block text-sm font-semibold text-slate-700 mb-1";
 const BOX =
@@ -25,12 +27,12 @@ const friendlyError = (err) => {
 };
 
 export default function Perfil() {
-  // Context (opcional). Si no está, que no rompa:
-  let ctx = { user: null, setUser: null, refreshMe: null };
+  // Context (tolerante si no existe)
+  let ctx = { user: null, setSession: null };
   try {
     ctx = useUser() || ctx;
   } catch {}
-  const { user, setUser, refreshMe } = ctx;
+  const { user, setSession } = ctx;
 
   const fileRef = useRef(null);
   const [msg, setMsg] = useState("");
@@ -38,7 +40,6 @@ export default function Perfil() {
 
   // ------ Perfil
   const [form, setForm] = useState({
-    username: "",
     email: "",
     nombre: "",
     apellido: "",
@@ -65,7 +66,6 @@ export default function Perfil() {
       try {
         const { data } = await api.get("/usuarios/me");
         setForm({
-          username: data?.username ?? "",
           email: data?.email ?? "",
           nombre: data?.nombre ?? "",
           apellido: data?.apellido ?? "",
@@ -80,7 +80,10 @@ export default function Perfil() {
 
   // Handlers
   const onChange = (e) => {
-    const { name, value } = e.target;
+    let { name, value } = e.target;
+    if (name === "dni") {
+      value = value.replace(/\D/g, "").slice(0, 8); // solo números, hasta 8
+    }
     setForm((p) => ({ ...p, [name]: value }));
   };
 
@@ -90,25 +93,41 @@ export default function Perfil() {
     setMsg("");
     try {
       const payload = {};
+      if (typeof form.email === "string") payload.email = form.email.trim();
       if (typeof form.nombre === "string") payload.nombre = form.nombre.trim();
       if (typeof form.apellido === "string") payload.apellido = form.apellido.trim();
       if (typeof form.dni === "string") payload.dni = form.dni.trim();
 
-      const { data } = await api.put("/usuarios/me", payload);
+      // ⬇️ Evita el 405: intenta /me (PUT/PATCH) y luego /{id}
+      const { data } = await updatePerfilSmart(payload, user?.id);
 
-      // refrescar contexto si está disponible
-      if (refreshMe) {
-        await refreshMe();
-      } else if (setUser) {
-        setUser({
-          ...(user || {}),
-          username: data?.username ?? form.username,
-          email: data?.email ?? form.email,
-          nombre: data?.nombre ?? payload.nombre ?? form.nombre,
-          apellido: data?.apellido ?? payload.apellido ?? form.apellido,
-          dni: data?.dni ?? payload.dni ?? form.dni,
-        });
+      const newUser = {
+        ...(user || {}),
+        email:    data?.email    ?? payload.email    ?? form.email,
+        nombre:   data?.nombre   ?? payload.nombre   ?? form.nombre,
+        apellido: data?.apellido ?? payload.apellido ?? form.apellido,
+        dni:      data?.dni      ?? payload.dni      ?? form.dni,
+      };
+
+      const newToken = data?.token || data?.access_token || data?.jwt || null;
+
+      if (setSession) {
+        if (newToken) {
+          setSession(newToken, newUser);
+        } else {
+          const current = getAuthToken();
+          setSession(current, newUser);
+        }
       }
+      lsSetUser(newUser);
+
+      setForm((p) => ({
+        ...p,
+        email: newUser.email,
+        nombre: newUser.nombre,
+        apellido: newUser.apellido,
+        dni: newUser.dni,
+      }));
 
       setMsg("Cambios guardados.");
     } catch (e2) {
@@ -141,7 +160,6 @@ export default function Perfil() {
       });
       if (r?.data?.avatar_url) setAvatarPreview(r.data.avatar_url);
       setAvatarMsg("Foto actualizada.");
-      if (refreshMe) await refreshMe();
       setTimeout(() => setAvatarMsg(""), 2500);
     } catch (e) {
       if (e?.response?.status === 404) {
@@ -156,11 +174,6 @@ export default function Perfil() {
   };
 
   // Seguridad
-  const onChangeSec = (e) => {
-    const { name, value } = e.target;
-    setSecForm((p) => ({ ...p, [name]: value }));
-  };
-
   const savePassword = async (e) => {
     e.preventDefault();
     if (!secForm.actual || !secForm.nueva || !secForm.confirmar) {
@@ -192,7 +205,7 @@ export default function Perfil() {
 
   return (
     <div className="min-h-[100dvh] bg-slate-50/50">
-      {/* ===== Bloque: Datos de perfil (igual estilo que Emprendimiento) ===== */}
+      {/* ===== Bloque: Datos de perfil ===== */}
       <div className={WRAP}>
         <div className={CARD}>
           <div className="mb-4">
@@ -200,7 +213,6 @@ export default function Perfil() {
             <p className="text-sm text-slate-600">Completá los datos de tu cuenta.</p>
           </div>
 
-          {/* Mensaje de estado */}
           {msg && (
             <div
               className={`mb-4 rounded-xl px-4 py-2 text-sm ring-1 ${
@@ -215,7 +227,7 @@ export default function Perfil() {
 
           <form onSubmit={savePerfil} className="grid grid-cols-1 gap-6">
             <div className="grid grid-cols-1 md:grid-cols-[auto,1fr] gap-6 items-start">
-              {/* Columna izquierda: Avatar (igual a “logo”) */}
+              {/* Avatar */}
               <div className="flex flex-col items-start gap-3">
                 <div className="h-[92px] w-[92px] rounded-full overflow-hidden border border-slate-200 bg-slate-50 grid place-items-center text-slate-400">
                   {avatarPreview ? (
@@ -253,54 +265,56 @@ export default function Perfil() {
                 </div>
 
                 <p className="text-[11px] text-slate-500">La foto se guarda localmente por ahora.</p>
-
-                {!!avatarMsg && (
-                  <p className="text-xs text-slate-700">{avatarMsg}</p>
-                )}
+                {!!avatarMsg && <p className="text-xs text-slate-700">{avatarMsg}</p>}
               </div>
 
-              {/* Columna derecha: Campos */}
+              {/* Campos */}
               <div className="grid gap-4">
-                <div>
-                  <label className={LABEL}>Usuario</label>
-                  <Input
-                    name="username"
-                    value={form.username}
-                    onChange={onChange}
-                    className={BOX}
-                    required
-                    disabled
-                    title="El usuario no se edita desde aquí"
-                  />
-                </div>
                 <div>
                   <label className={LABEL}>Correo electrónico</label>
                   <Input
                     type="email"
                     name="email"
+                    autoComplete="email"
                     value={form.email}
                     onChange={onChange}
                     className={BOX}
                     required
-                    disabled
-                    title="El correo no se edita desde aquí"
                   />
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
                     <label className={LABEL}>Nombre</label>
-                    <Input name="nombre" value={form.nombre} onChange={onChange} className={BOX} />
+                    <Input
+                      name="nombre"
+                      autoComplete="given-name"
+                      value={form.nombre}
+                      onChange={onChange}
+                      className={BOX}
+                    />
                   </div>
                   <div>
                     <label className={LABEL}>Apellido</label>
-                    <Input name="apellido" value={form.apellido} onChange={onChange} className={BOX} />
+                    <Input
+                      name="apellido"
+                      autoComplete="family-name"
+                      value={form.apellido}
+                      onChange={onChange}
+                      className={BOX}
+                    />
                   </div>
                 </div>
 
                 <div>
                   <label className={LABEL}>DNI</label>
-                  <Input name="dni" value={form.dni} onChange={onChange} className={BOX} />
+                  <Input
+                    name="dni"
+                    autoComplete="off"
+                    value={form.dni}
+                    onChange={onChange}
+                    className={BOX}
+                  />
                 </div>
               </div>
             </div>
@@ -314,7 +328,7 @@ export default function Perfil() {
         </div>
       </div>
 
-      {/* ===== Bloque: Seguridad (mismo estilo visual) ===== */}
+      {/* ===== Bloque: Seguridad ===== */}
       <div className={WRAP}>
         <div className={CARD}>
           <div className="mb-4">
@@ -340,8 +354,9 @@ export default function Perfil() {
               <Input
                 type="password"
                 name="actual"
+                autoComplete="current-password"
                 value={secForm.actual}
-                onChange={onChangeSec}
+                onChange={e => setSecForm(p => ({ ...p, actual: e.target.value }))}
                 className={BOX}
                 required
               />
@@ -351,8 +366,9 @@ export default function Perfil() {
               <Input
                 type="password"
                 name="nueva"
+                autoComplete="new-password"
                 value={secForm.nueva}
-                onChange={onChangeSec}
+                onChange={e => setSecForm(p => ({ ...p, nueva: e.target.value }))}
                 className={BOX}
                 required
               />
@@ -362,8 +378,9 @@ export default function Perfil() {
               <Input
                 type="password"
                 name="confirmar"
+                autoComplete="new-password"
                 value={secForm.confirmar}
-                onChange={onChangeSec}
+                onChange={e => setSecForm(p => ({ ...p, confirmar: e.target.value }))}
                 className={BOX}
                 required
               />
@@ -383,14 +400,14 @@ export default function Perfil() {
         </div>
       </div>
 
-      {/* Overlay de proceso (simple) */}
+      {/* Overlay de proceso */}
       {overlayBusy && (
         <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/50 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 p-6 text-center">
             <div className="mx-auto mb-4 h-12 w-12 grid place-items-center rounded-full bg-slate-100">
               <svg className="h-6 w-6 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" className="opacity-20" />
-                <path d="M21 12a9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="2" className="opacity-80" />
+                <path d="M21 12a 9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="2" className="opacity-80" />
               </svg>
             </div>
             <p className="text-sm text-slate-700">Procesando…</p>

@@ -1,9 +1,7 @@
-// src/components/Header.jsx
 import React, { useEffect, useRef, useState } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { useUser } from "../context/UserContext.jsx";
-import { getAuthToken, clearAuthToken } from "../services/api";
-import { logout as authLogout } from "../services/auth";
+import { getAuthToken, clearAuthToken, clearUser } from "../services/api";
 
 const LOGO_SRC = "/images/TurnateLogo.png";
 
@@ -57,7 +55,6 @@ function Icon({ name, className = "w-4 h-4" }) {
   }
 }
 
-// ---- Helpers de lógica (no cambian el diseño) ----
 function normalizeRoles(rolesAny, rolCompat) {
   const out = new Set();
   if (Array.isArray(rolesAny)) {
@@ -71,7 +68,6 @@ function normalizeRoles(rolesAny, rolCompat) {
 }
 
 export default function Header() {
-  // Del contexto tomamos solo lo que realmente existe
   const { user, setUser, isAuthenticated, isEmprendedor, refreshMe } = useUser() || {};
   const [openAvatarMenu, setOpenAvatarMenu] = useState(false);
 
@@ -79,22 +75,17 @@ export default function Header() {
   const avatarMenuRef = useRef(null);
   const navigate = useNavigate();
 
-  // Si hay token persistido pero aún no hay user en memoria, hidratamos /me
   useEffect(() => {
     const t = getAuthToken();
     if (t && !user) {
-      // no bloquea la UI; cuando resuelva, Header re-renderiza
       refreshMe?.();
     }
   }, [user, refreshMe]);
 
-  // isAuth verdadero si el contexto dice autenticado o si al menos hay token guardado
   const isAuth = !!isAuthenticated || !!getAuthToken();
 
-  // Roles (compatibilidad con estructuras antiguas)
   const roles = normalizeRoles(user?.roles, user?.rol);
   const isAdmin = roles.includes("admin") || (!!user && Number(user.id) === 1);
-  // isEmprendedor ya viene del contexto; mantenemos compat por si user trae flags antiguos:
   const isEmp = isEmprendedor || !!(user?.es_emprendedor || user?.is_emprendedor);
 
   useEffect(() => {
@@ -121,13 +112,7 @@ export default function Header() {
   }, [openAvatarMenu]);
 
   const handleLogout = () => {
-    try { authLogout(); } catch {}
-    try {
-      clearAuthToken();
-      // limpieza de llaves viejas por compat
-      localStorage.removeItem("accessToken");
-      localStorage.removeItem("user");
-    } catch {}
+    try { clearAuthToken(); clearUser(); } catch {}
     setUser?.(null);
     setOpenAvatarMenu(false);
     navigate("/login", { replace: true });
@@ -139,7 +124,6 @@ export default function Header() {
   return (
     <header className="bg-gradient-to-r from-blue-600 to-cyan-400 shadow-lg fixed inset-x-0 top-0 z-50">
       <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-10 py-4 md:py-5 flex items-center justify-between">
-        {/* Logo */}
         <Link to="/" className="flex items-center gap-3">
           <img
             src={LOGO_SRC}
@@ -151,12 +135,9 @@ export default function Header() {
           <span className="font-extrabold text-2xl text-white tracking-tight">Turnate</span>
         </Link>
 
-        {/* Navegación principal (mismo markup/clases) */}
         <nav className="flex items-center gap-3">
           <NavLink to="/" end className={navClass}>Inicio</NavLink>
           <NavLink to="/nosotros" end className={navClass}>Nosotros</NavLink>
-
-          {/* Reportes solo Admin */}
           {isAuth && isAdmin && (
             <NavLink to="/admin" end className={navClass}>Reportes</NavLink>
           )}

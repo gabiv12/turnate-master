@@ -22,10 +22,13 @@ const ItemLink = ({ to, children }) => (
 );
 
 export default function PanelShell() {
-  const { user, refreshUser, logout } = useUser();
+  const ctx = useUser() || {};
+  const user = ctx.user || null;
+  const refreshUser = ctx.refreshUser || (() => {});
+  const logout = ctx.logout || (() => {});
   const navigate = useNavigate();
-  const [open, setOpen] = useState(false);
 
+  const [open, setOpen] = useState(false);
   const [isEmp, setIsEmp] = useState(empCheck(user));
   const [isAdm, setIsAdm] = useState(adminCheck(user));
 
@@ -39,7 +42,7 @@ export default function PanelShell() {
   useEffect(() => {
     if (didInit.current) return;
     didInit.current = true;
-    refreshUser?.();
+    refreshUser();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -78,7 +81,6 @@ export default function PanelShell() {
                     <ItemLink to="/perfil">Editar Perfil</ItemLink>
                     <ItemLink to="/emprendimiento">Emprendimiento</ItemLink>
                     <ItemLink to="/turnos">Turnos</ItemLink>
-                    
                     {isAdm && <ItemLink to="/admin">Admin</ItemLink>}
                     <ItemLink to="/estadisticas">Estadísticas</ItemLink>
                   </div>
@@ -86,7 +88,7 @@ export default function PanelShell() {
                   <div className="mt-4">
                     <button
                       onClick={() => {
-                        logout?.();
+                        logout();
                         navigate("/login", { replace: true });
                       }}
                       className="w-full rounded-xl px-4 py-3 text-sm font-semibold text-white bg-gradient-to-r from-rose-600 to-red-500 shadow hover:brightness-110"
@@ -106,7 +108,7 @@ export default function PanelShell() {
               </div>
             </aside>
 
-            {/* ✅ alto mínimo arreglado para que no “se coma” Footer */}
+            {/* ✅ alto mínimo para que no “se coma” el Footer */}
             <section className="min-h-[60vh] min-w-0 bg-white/0">
               <Outlet />
             </section>

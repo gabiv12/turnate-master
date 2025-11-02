@@ -1,61 +1,51 @@
 // src/services/auth.js
-import api, { setAuthToken, clearAuthToken } from "./api";
+import api, { setAuthToken, TOKEN_KEY, USER_KEY } from "./api";
 
-/* Guarda token en TODAS las claves vistas en el repo (compat total) */
-function persistTokenCompat(token) {
-  if (!token) return;
+// Guarda user en localStorage (compat)
+export function setStoredUser(user) {
   try {
-    localStorage.setItem("accessToken", token);
-    localStorage.setItem("token", token);
-    localStorage.setItem("access_token", token);
-    localStorage.setItem("jwt", token);
-    localStorage.setItem("access", token);
+    localStorage.setItem(USER_KEY, JSON.stringify(user || null));
   } catch {}
-  setAuthToken(token);
+}
+export function getStoredUser() {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
-/* Login: username O email (evita 400 del backend) */
-export async function login(identifier, password) {
-  const id = String(identifier || "").trim();
-  const body = id.includes("@") ? { email: id, password } : { username: id, password };
-  const { data } = await api.post("/usuarios/login", body);
-  const token = data?.token || data?.access_token || data?.jwt;
-  if (!token) throw new Error("No se recibió token.");
-  persistTokenCompat(token);
-  return { token, user: data?.user || null };
+export async function login({ email, username, identity, password }) {
+  // El back usa email como “usuario”. Mandamos el mejor campo disponible.
+  const payload =
+    email ? { email, password } :
+    identity ? { identity, password } :
+    username ? { username, password } :
+    { email: username, password }; // fallback
+
+  const { data } = await api.post("/usuarios/login", payload);
+
+  const token = data?.access_token || data?.token || data?.jwt;
+  const user = data?.user || data?.usuario || data;
+
+  if (!token || !user) {
+    throw new Error("Respuesta de login incompleta.");
+  }
+
+  setAuthToken(token);
+  setStoredUser(user);
+  return { token, user };
 }
 
 export function logout() {
-  clearAuthToken();
   try {
-    localStorage.removeItem("accessToken");
-    localStorage.removeItem("token");
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("jwt");
-    localStorage.removeItem("access");
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
   } catch {}
 }
 
-/* Registro: envía 'nombre' para no romper NOT NULL */
-export async function register({ email, username, password, nombre, apellido, dni }) {
-  const payload = {
-    email: String(email || "").trim().toLowerCase(),
-    username: String(username || "").trim(),
-    password: String(password || ""),
-    nombre: (nombre && String(nombre).trim()) || "Usuario",
-    apellido: (apellido && String(apellido).trim()) || "",
-    ...(dni ? { dni } : {}),
-  };
-  const { data } = await api.post("/usuarios/registro", payload);
-  const token = data?.token || data?.access_token || null;
-  if (token) persistTokenCompat(token);
-  return data;
-}
-
-/* Variante /me por si tu UI la usa */
-export async function activarEmprendedorMe() {
-  const { data } = await api.put("/usuarios/me/activar_emprendedor");
-  const token = data?.token || data?.access_token || null;
-  if (token) persistTokenCompat(token);
+export async function fetchMe() {
+  const { data } = await api.get("/usuarios/me");
   return data;
 }

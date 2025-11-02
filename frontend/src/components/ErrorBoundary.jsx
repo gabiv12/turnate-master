@@ -1,3 +1,4 @@
+// src/components/ErrorBoundary.jsx
 import React from "react";
 
 export default class ErrorBoundary extends React.Component {
@@ -5,26 +6,26 @@ export default class ErrorBoundary extends React.Component {
     super(props);
     this.state = { err: null };
   }
-
-  static getDerivedStateFromError(error) {
-    return { err: error };
-  }
-
+  static getDerivedStateFromError(error) { return { err: error }; }
   componentDidCatch(error, info) {
-    // Log discreto en consola
-    console.error("UI error capturado:", error, info);
+    // además de renderizar, logueamos en consola
+    console.error("[ErrorBoundary] error:", error, "info:", info);
   }
-
   render() {
-    const { err } = this.state;
-    if (err) {
-      // Fallback minimalista (no interfiere con estilos globales)
+    if (this.state.err) {
       return (
-        <div style={{ padding: 16 }}>
-          <h1 style={{ fontSize: 18, marginBottom: 8 }}>Se produjo un problema</h1>
-          <pre style={{ whiteSpace: "pre-wrap", fontSize: 12 }}>
-            {String(err?.message || err)}
+        <div style={{padding:"24px", fontFamily:"ui-sans-serif,system-ui", background:"#fff"}}>
+          <h1 style={{fontSize:24, fontWeight:700, color:"#b91c1c"}}>Se produjo un error en la UI</h1>
+          <p style={{marginTop:8}}>La página se puso en blanco por un error de React. Detalles abajo.</p>
+          <pre style={{whiteSpace:"pre-wrap", marginTop:12, padding:12, background:"#f8fafc", border:"1px solid #e5e7eb", borderRadius:8}}>
+{String(this.state.err?.stack || this.state.err || "Error desconocido")}
           </pre>
+          <p style={{marginTop:12, fontSize:12, color:"#475569"}}>
+            Revisa la consola (F12 &rarr; Console) y los imports del componente que estabas abriendo.
+          </p>
+          <button onClick={()=>location.reload()} style={{marginTop:16, padding:"10px 16px", borderRadius:10, background:"#2563eb", color:"#fff", fontWeight:600}}>
+            Recargar
+          </button>
         </div>
       );
     }

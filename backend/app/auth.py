@@ -1,37 +1,28 @@
-# app/auth.py
 import os
-import bcrypt
-import jwt
 from datetime import datetime, timedelta
+from typing import Any, Dict
+from jose import jwt
+from passlib.context import CryptContext
 from dotenv import load_dotenv
 
 load_dotenv()
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
-JWT_ALG = "HS256"
-JWT_EXP_MIN = int(os.getenv("JWT_EXP_MIN", "120"))
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+ALGORITHM = "HS256"
 
-def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt(12)).decode("utf-8")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# ✅ Alias para compatibilidad con código viejo
-def get_password_hash(plain: str) -> str:
-    return hash_password(plain)
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
 
-def verify_password(plain: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
-    except Exception:
-        return False
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
 
-def create_access_token(user_id: int) -> str:
-    now = datetime.utcnow()
-    payload = {
-        "sub": str(user_id),
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=JWT_EXP_MIN)).timestamp())
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
+def create_access_token(data: Dict[str, Any]) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire, "iat": datetime.utcnow()})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-def decode_access_token(token: str) -> int:
-    data = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-    return int(data["sub"])
+def decode_access_token(token: str) -> Dict[str, Any]:
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])

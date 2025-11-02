@@ -1,92 +1,76 @@
 // src/context/UserContext.jsx
-import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
-import api, { getAuthToken, setAuthToken, clearAuthToken } from "../services/api";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import api, {
+  getAuthToken,
+  setAuthToken,
+  clearAuthToken,
+  getUser as getUserLS,
+  setUser as setUserLS,
+} from "../services/api.js";
 
-// === helpers de rol (tolerantes) ===
-function hasRole(user, name) {
-  if (!user) return false;
-  const target = String(name || "").toLowerCase();
-
-  // rol simple
-  const single = String(user.rol || "").toLowerCase();
-  if (single === target) return true;
-
-  // array de roles
-  const roles = user.roles || [];
-  for (const r of roles) {
-    const v = (r && (r.nombre || r)) ? String(r.nombre || r).toLowerCase() : "";
-    if (v === target) return true;
-  }
-
-  // flags alternativos comunes
-  if ((user.es_emprendedor || user.is_emprendedor) && target === "emprendedor") return true;
-
-  return false;
-}
-
-const UserCtx = createContext(null);
-export const useUser = () => useContext(UserCtx);
+const Ctx = createContext({
+  user: null,
+  isAuthenticated: false,
+  isEmprendedor: false,
+  setUser: () => {},
+  refreshUser: async () => null,
+  loginFromResponse: () => {},
+  logout: () => {},
+});
 
 export function UserProvider({ children }) {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true); // evita "Cargando..." infinito si no se corta
-
-  const boot = useCallback(async () => {
-    setLoading(true);
-    try {
-      const t = getAuthToken();
-      if (!t) {
-        setUser(null);
-        setLoading(false);
-        return;
-      }
-      const { data } = await api.get("/usuarios/me");
-      setUser(data || null);
-    } catch {
-      clearAuthToken();
-      setUser(null);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const [user, setUser] = useState(() => getUserLS());
 
   useEffect(() => {
-    boot();
-  }, [boot]);
+    // mantener en LS
+    setUserLS(user);
+  }, [user]);
 
-  const refreshUser = useCallback(async () => {
+  async function refreshUser() {
     try {
       const { data } = await api.get("/usuarios/me");
-      setUser(data || null);
-      return data || null;
-    } catch {
+      if (data) setUser(data);
+      return data;
+    } catch (e) {
+      if (e?.response?.status === 401) {
+        // /me vencido -> sesión inválida
+        clearAuthToken();
+        setUser(null);
+      }
       return null;
     }
-  }, []);
+  }
 
-  const logout = useCallback(() => {
+  function loginFromResponse({ token, user }) {
+    if (token) setAuthToken(token);
+    if (user) setUser(user);
+  }
+
+  function logout() {
     clearAuthToken();
-    try { localStorage.removeItem("user"); } catch {}
     setUser(null);
-  }, []);
+  }
 
-  const value = {
+  const isEmprendedor = useMemo(() => {
+    const roles = new Set();
+    if (Array.isArray(user?.roles)) user.roles.forEach(r => roles.add(String(r).toLowerCase()));
+    if (user?.rol) roles.add(String(user.rol).toLowerCase());
+    return roles.has("emprendedor");
+  }, [user]);
+
+  const value = useMemo(() => ({
     user,
+    isAuthenticated: !!getAuthToken(),
+    isEmprendedor,
     setUser,
-    loading,
-    isAuthenticated: !!user,
-    isEmprendedor: hasRole(user, "emprendedor"),
-    isAdmin: hasRole(user, "admin"),
     refreshUser,
+    loginFromResponse,
     logout,
-    setSession: (token, u = null) => {
-      setAuthToken(token);
-      if (u) setUser(u);
-    },
-  };
+  }), [user, isEmprendedor]);
 
-  return <UserCtx.Provider value={value}>{children}</UserCtx.Provider>;
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
-// ⬇️ export default también, así no tenés que tocar main.jsx
-export default UserProvider;
+export function useUser() {
+  return useContext(Ctx);
+}

@@ -1,142 +1,111 @@
-// src/pages/Horarios.jsx
-import { useEffect, useState } from "react";
-import { api } from "../services/api";
+// src/services/horarios.js
+import api, { errorMessage } from "./api";
 
-const BTN = "rounded-xl bg-sky-600 text-white px-4 py-2 text-sm font-semibold shadow hover:bg-sky-700";
-const dias = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
+/* =========================
+   Normalizadores y validaciones
+   ========================= */
+function hhmm(s) {
+  if (!s) return "00:00";
+  const parts = String(s).trim().split(":");
+  const h = parseInt(parts[0] || "0", 10);
+  const m = parseInt(parts[1] || "0", 10);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return "00:00";
+  const H = Math.min(Math.max(h, 0), 23);
+  const M = Math.min(Math.max(m, 0), 59);
+  return `${H.toString().padStart(2, "0")}:${M.toString().padStart(2, "0")}`;
+}
+function normDia(d) {
+  const n = parseInt(d, 10);
+  if (Number.isFinite(n)) {
+    if (n >= 0 && n <= 6) return n;       // 0..6 (L..D)
+    if (n >= 1 && n <= 7) return n % 7;   // 1..7 -> 0..6 (7->0)
+  }
+  return 0;
+}
+function toMin(hhmmStr) {
+  const [h, m] = hhmm(hhmmStr).split(":").map(x => parseInt(x, 10));
+  return h * 60 + m;
+}
+function normIntervalo(x) {
+  const n = parseInt(x, 10);
+  return Number.isFinite(n) && n > 0 ? n : 30;
+}
+function normalizeBloques(raw) {
+  const arr = Array.isArray(raw) ? raw : [];
+  return arr
+    .map(b => {
+      const dia = normDia(b?.dia);
+      const desde = hhmm(b?.desde);
+      const hasta = hhmm(b?.hasta);
+      const intervalo = normIntervalo(b?.intervalo);
+      return { dia, desde, hasta, intervalo };
+    })
+    // Filtramos bloques claramente inválidos para evitar 422
+    .filter(b => toMin(b.desde) < toMin(b.hasta));
+}
 
-export default function Horarios() {
-  const [owner, setOwner] = useState(null);
-  const [items, setItems] = useState([]); // [{ dia_semana, hora_desde, hora_hasta, intervalo_min, activo }]
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const me = await api.get("/emprendedores/mi");
-        if (me?.data?.id) setOwner({ id: me.data.id });
-      } catch {}
-    })();
-  }, []);
-
-  const load = async () => {
+/* =========================
+   Lectura de horarios (dueño)
+   ========================= */
+export async function obtenerHorarios(emprendedorId) {
+  const tries = [
+    { method: "get", url: `/horarios/mis` },
+    { method: "get", url: `/emprendedores/${emprendedorId}/horarios` },
+  ];
+  for (const t of tries) {
     try {
-      const rh = await api.get("/horarios/mis");
-      setItems(Array.isArray(rh.data) ? rh.data : []);
-    } catch {
-      setItems([]);
+      const { data } = await api.request(t);
+      return Array.isArray(data) ? data : [];
+    } catch (e) {
+      // En tu api.js el interceptor ya devuelve string. Por compatibilidad:
+      const st = e?.response?.status;
+      if ([404, 405].includes(st)) continue;
+      if (typeof e === "string") throw e;
+      throw errorMessage(e);
     }
-  };
-  useEffect(() => { load(); }, [owner?.id]);
+  }
+  return [];
+}
 
-  const onChangeField = (idx, field, value) => {
-    setItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [field]: value } : it)));
-  };
+/* =========================
+   Reemplazo de horarios (dueño)
+   - Normaliza: día, HH:MM, intervalo, y descarta desde>=hasta.
+   - Intenta primero {bloques:[...]}.
+   - Si responde 422, reintenta con body [] plano.
+   - Luego prueba fallbacks por emprendedor.
+   ========================= */
+export async function reemplazarHorarios(emprendedorId, payload /* { bloques: [...] } */) {
+  const bloques = normalizeBloques(payload?.bloques || payload || []);
 
-  const addBlock = () => {
-    setItems((prev) => [
-      ...prev,
-      { dia_semana: 1, hora_desde: "09:00", hora_hasta: "18:00", intervalo_min: 30, activo: true },
-    ]);
-  };
+  if (!bloques.length) {
+    return Promise.reject("No hay bloques válidos para guardar.");
+  }
 
-  const remove = (idx) => setItems((prev) => prev.filter((_, i) => i !== idx));
+  const attempts = [
+    // 1) Lo que espera el back nuevo
+    { method: "post", url: `/horarios/mis`, data: { bloques } },
+    // 2) Tolerancia: lista plana
+    { method: "post", url: `/horarios/mis`, data: bloques },
+    // 3) Fallbacks por emprendedor (si existieran en tu back)
+    { method: "put", url: `/emprendedores/${emprendedorId}/horarios:replace`, data: { bloques } },
+    { method: "put", url: `/emprendedores/${emprendedorId}/horarios`, data: { bloques } },
+  ];
 
-  const saveAll = async () => {
-    if (!owner?.id) return alert("Activá Emprendedor desde Perfil/Emprendimiento.");
+  let last = "No se pudieron guardar los horarios.";
+  for (const req of attempts) {
     try {
-      // el back reemplaza todo el set
-      await api.put(`/emprendedores/${owner.id}/horarios:replace`, {
-        horarios: items.map((h) => ({
-          dia_semana: Number(h.dia_semana),
-          hora_desde: (h.hora_desde || "09:00").slice(0, 5),
-          hora_hasta: (h.hora_hasta || "18:00").slice(0, 5),
-          intervalo_min: Number(h.intervalo_min || 30),
-          activo: h.activo !== false,
-        })),
-      });
-      alert("Horarios guardados.");
-      await load();
-    } catch {
-      alert("No se pudieron guardar los horarios.");
+      const { data } = await api.request(req);
+      // Devolvemos tal cual o reconstruimos desde nuestra normalización
+      if (Array.isArray(data)) return data;
+      if (Array.isArray(data?.bloques)) return data.bloques;
+      return bloques;
+    } catch (e) {
+      // Si es string viene del interceptor; si no, lo transformamos
+      const msg = typeof e === "string" ? e : errorMessage(e);
+      // Si es un 422, seguimos probando siguiente formato de body
+      last = msg;
+      continue;
     }
-  };
-
-  return (
-    <div className="space-y-4">
-      <header className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow">
-        <div className="mx-auto max-w-6xl">
-          <h1 className="text-2xl font-semibold">Horarios</h1>
-          <p className="text-sm opacity-90">Definí tus días y bloques disponibles.</p>
-        </div>
-      </header>
-
-      <div className="mx-auto max-w-6xl rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-3 flex items-center justify-between">
-          <div className="font-medium text-slate-700">Bloques</div>
-          <div className="flex gap-2">
-            <button onClick={addBlock} className="rounded-xl bg-white text-sky-700 px-3 py-2 text-sm font-semibold ring-1 ring-sky-200 shadow">
-              + Agregar
-            </button>
-            <button onClick={saveAll} className={BTN}>Guardar</button>
-          </div>
-        </div>
-
-        {items.length === 0 ? (
-          <div className="text-sm text-slate-500">No hay bloques cargados.</div>
-        ) : (
-          <div className="grid gap-3">
-            {items.map((h, idx) => (
-              <div key={idx} className="grid grid-cols-1 md:grid-cols-[100px_120px_120px_120px_auto] items-center gap-2 rounded-xl border border-slate-200 p-3">
-                <select
-                  value={h.dia_semana}
-                  onChange={(e) => onChangeField(idx, "dia_semana", Number(e.target.value))}
-                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                >
-                  {dias.map((d, i) => (
-                    <option key={i} value={i}>{d}</option>
-                  ))}
-                </select>
-
-                <input
-                  type="time"
-                  value={h.hora_desde?.slice(0,5) || "09:00"}
-                  onChange={(e) => onChangeField(idx, "hora_desde", e.target.value)}
-                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                />
-                <input
-                  type="time"
-                  value={h.hora_hasta?.slice(0,5) || "18:00"}
-                  onChange={(e) => onChangeField(idx, "hora_hasta", e.target.value)}
-                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                />
-
-                <input
-                  type="number"
-                  min={5}
-                  max={600}
-                  value={h.intervalo_min || 30}
-                  onChange={(e) => onChangeField(idx, "intervalo_min", Number(e.target.value))}
-                  className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
-                />
-
-                <div className="flex items-center gap-2 justify-end">
-                  <label className="text-sm text-slate-600 flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      checked={h.activo !== false}
-                      onChange={(e) => onChangeField(idx, "activo", e.target.checked)}
-                    />
-                    Activo
-                  </label>
-                  <button onClick={() => remove(idx)} className="rounded-lg bg-rose-600 text-white text-xs font-semibold px-3 py-1.5 shadow">
-                    Eliminar
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
+  }
+  return Promise.reject(last);
 }

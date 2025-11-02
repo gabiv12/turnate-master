@@ -2,47 +2,29 @@
 import React from "react";
 import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { useUser } from "../context/UserContext.jsx";
-
-// Tolerante a backends: chequea rol por string o array
-function userHasRole(user, name) {
-  if (!user) return false;
-  const target = String(name || "").toLowerCase();
-  const single = String(user.rol || "").toLowerCase();
-  if (single === target) return true;
-  const roles = user.roles || [];
-  for (const r of roles) {
-    const v = (r && (r.nombre || r)) ? String(r.nombre || r).toLowerCase() : "";
-    if (v === target) return true;
-  }
-  if ((user.es_emprendedor || user.is_emprendedor) && target === "emprendedor") return true;
-  return false;
-}
+import { getAuthToken } from "../services/api";
 
 export default function ProtectedRoute({ requireRole }) {
-  const { loading, isAuthenticated, user } = useUser();
-  const location = useLocation();
+  const { isAuthenticated, isEmprendedor, user } = useUser() || {};
+  const loc = useLocation();
+  const hasToken = !!getAuthToken();
 
-  // ⛔ Mientras carga el contexto → mantené un estado visible mínimo (evita loops)
-  if (loading) {
-    return (
-      <div className="py-24 grid place-items-center">
-        <div className="w-full max-w-sm rounded-2xl bg-white/80 shadow p-6 text-center">
-          <div className="animate-pulse text-slate-600 font-semibold">Cargando…</div>
-        </div>
-      </div>
-    );
+  if (!hasToken || !isAuthenticated) {
+    return <Navigate to="/login" state={{ from: loc }} replace />;
   }
 
-  // No autenticado → a login (y guardo a dónde quería ir)
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  if (requireRole) {
+    const roles = new Set();
+    if (Array.isArray(user?.roles)) user.roles.forEach(r => roles.add(String(r).toLowerCase()));
+    if (user?.rol) roles.add(String(user.rol).toLowerCase());
+
+    const isAdmin = roles.has("admin") || (user && Number(user.id) === 1);
+    const ok =
+      (requireRole === "admin" && isAdmin) ||
+      (requireRole === "emprendedor" && (isEmprendedor || roles.has("emprendedor")));
+
+    if (!ok) return <Navigate to="/reservar" replace />;
   }
 
-  // Con rol requerido y no cumple → lo mando al perfil
-  if (requireRole && !userHasRole(user, requireRole)) {
-    return <Navigate to="/perfil" replace />;
-  }
-
-  // OK
   return <Outlet />;
 }

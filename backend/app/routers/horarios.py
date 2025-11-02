@@ -1,183 +1,182 @@
 ﻿# app/routers/horarios.py
-from fastapi import APIRouter, Depends, HTTPException, Body
+from __future__ import annotations
+from typing import Any, Dict, List
+from datetime import time as dt_time
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
-from datetime import datetime, time as dt_time
-from typing import Any, Dict, List, Optional
 
 from app.deps import get_db, get_current_user
-from app.models import Usuario, Emprendedor, Horario
+from app import models
 
 router = APIRouter(prefix="/horarios", tags=["horarios"])
 
-# --- helpers de reflexión sobre el modelo ---
-CAND_DIA = ["dia_semana", "dia", "weekday"]
-CAND_INICIO = ["desde", "hora_desde", "inicio", "hora_inicio", "start"]
-CAND_FIN = ["hasta", "hora_hasta", "fin", "hora_fin", "end"]
-CAND_INTERVALO = ["intervalo_min", "intervalo", "duracion_min", "duracion"]
-CAND_EMP_ID = ["emprendedor_id", "id_emprendedor", "owner_id"]
+# ---------- helpers ----------
+def _norm_dia(v: Any) -> int:
+    try:
+        n = int(v)
+    except Exception:
+        n = 0
+    if 0 <= n <= 6:
+        return n
+    if 1 <= n <= 7:
+        return n % 7
+    return 0
 
-def _first_attr_name(model, candidates) -> Optional[str]:
-    for n in candidates:
-        if hasattr(model, n):
-            return n
-    return None
+def _hhmm(s: Any) -> str:
+    if not s:
+        return "09:00"
+    parts = str(s).split(":")
+    h = parts[0].zfill(2)
+    m = (parts[1] if len(parts) > 1 else "00").zfill(2)
+    return f"{h}:{m}"
 
-# Descubre los nombres reales en TU modelo Horario
-DIA_COL = _first_attr_name(Horario, CAND_DIA) or "dia_semana"
-INICIO_COL = _first_attr_name(Horario, CAND_INICIO)  # puede ser None
-FIN_COL = _first_attr_name(Horario, CAND_FIN)        # puede ser None
-INTERVALO_COL = _first_attr_name(Horario, CAND_INTERVALO)  # opcional
-EMP_ID_COL = _first_attr_name(Horario, CAND_EMP_ID) or "emprendedor_id"
+def _to_minutes(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
 
-def _hhmm_to_time(v: str) -> dt_time:
-    if isinstance(v, dt_time):
-        return v
-    if not isinstance(v, str):
-        raise ValueError("Hora inválida")
-    v = v.strip()
-    for fmt in ("%H:%M", "%H:%M:%S"):
-        try:
-            return datetime.strptime(v, fmt).time()
-        except ValueError:
-            continue
-    parts = v.split(":")
-    if len(parts) >= 2:
-        h = str(parts[0]).zfill(2)
-        m = str(parts[1]).zfill(2)
-        s = str(parts[2]).zfill(2) if len(parts) > 2 else "00"
-        return datetime.strptime(f"{h}:{m}:{s}", "%H:%M:%S").time()
-    raise ValueError("Hora inválida")
+def _to_time(hhmm: str) -> dt_time:
+    h, m = hhmm.split(":")
+    return dt_time(hour=int(h), minute=int(m))
 
-def _fmt_time(val: Any) -> str:
-    if isinstance(val, dt_time):
-        return val.strftime("%H:%M")
-    if isinstance(val, str):
-        try:
-            return _hhmm_to_time(val).strftime("%H:%M")
-        except Exception:
-            return val
-    return ""
-
-def _current_emprendedor(db: Session, user: Usuario) -> Emprendedor:
-    emp = db.query(Emprendedor).filter(Emprendedor.usuario_id == user.id).first()
+def _get_owner_emprendedor(db: Session, user_id: int) -> models.Emprendedor:
+    emp = db.query(models.Emprendedor).filter(models.Emprendedor.usuario_id == user_id).first()
     if not emp:
-        raise HTTPException(status_code=404, detail="Aún no tenés un emprendimiento activo.")
+        raise HTTPException(status_code=404, detail="Emprendedor no activado")
     return emp
 
-def _normalize_payload_to_flat_items(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    items = payload.get("items")
-    if not items and isinstance(payload, list):
-        items = payload
-    items = items or []
+def _row_base(dia: int, intervalo: int = 30) -> Dict[str, Any]:
+    return {"dia_semana": _norm_dia(dia), "intervalo_min": int(intervalo or 30), "bloques": []}
 
-    flat: List[Dict[str, Any]] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        dia = int(it.get("dia_semana", it.get("dia", it.get("weekday", -1))))
-        if dia < 0:
-            continue
-        intervalo_min = int(it.get("intervalo_min", it.get("intervalo", it.get("duracion_min", it.get("duracion", 30)))))
-        activo = it.get("activo", True)
+# ---------- GET ----------
+@router.get("/mis")
+def get_mis_horarios(db: Session = Depends(get_db), user=Depends(get_current_user)):
+    emp = _get_owner_emprendedor(db, user.id)
 
-        if "bloques" in it and isinstance(it["bloques"], list):
+    filas = (
+        db.query(models.Horario)
+        .filter(models.Horario.emprendedor_id == emp.id)
+        .order_by(models.Horario.dia_semana.asc(), models.Horario.inicio.asc())
+        .all()
+    )
+
+    base: Dict[int, Dict[str, Any]] = {i: _row_base(i, 30) for i in [0,1,2,3,4,5,6]}
+    for r in filas:
+        d = _norm_dia(r.dia_semana)
+        base[d]["bloques"].append({
+            "desde": _hhmm(r.inicio.strftime("%H:%M")),
+            "hasta": _hhmm(r.fin.strftime("%H:%M")),
+        })
+
+    order = [1,2,3,4,5,6,0]
+    items = []
+    for i in order:
+        row = base[i]
+        if not row.get("intervalo_min"):
+            row["intervalo_min"] = 30
+        items.append(row)
+
+    return {"items": items}
+
+# ---------- POST (reemplazo total) ----------
+@router.post("/mis", status_code=200)
+async def replace_mis_horarios(request: Request, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    """
+    Acepta:
+      - Plano: [ { dia_semana|dia|weekday, desde|inicio, hasta|fin, intervalo_min|intervalo } ... ]
+      - Agrupado:
+        { items: [ { dia_semana|dia|weekday, activo, intervalo_min|intervalo, bloques:[{desde|inicio, hasta|fin}] } ] }
+      - {bloques:[...]} o lista directa.
+    Tolera cuerpo como string JSON (doble-serializado). Si no quedan bloques válidos, limpia agenda y responde 200.
+    """
+    emp = _get_owner_emprendedor(db, user.id)
+
+    # 1) Leer el cuerpo sin tipado
+    try:
+        body: Any = await request.json()
+    except Exception:
+        body = None
+
+    # 2) Si vino como string JSON, parsear
+    if isinstance(body, str):
+        txt = body.strip()
+        try:
+            body = json.loads(txt)
+        except Exception:
+            # Si es string no-json, lo tratamos como vacío => limpiar
+            body = []
+
+    def as_list(x): return x if isinstance(x, list) else []
+
+    # 3) Unificar "items" candidates
+    items_any: List[Dict[str, Any]] = []
+    if isinstance(body, dict) and isinstance(body.get("items"), list):
+        items_any = body["items"]
+    elif isinstance(body, dict) and isinstance(body.get("bloques"), list):
+        items_any = body["bloques"]
+    elif isinstance(body, list):
+        items_any = body
+    else:
+        items_any = []
+
+    # 4) Normalizar a lista plana de bloques
+    planos: List[Dict[str, Any]] = []
+
+    if items_any and isinstance(items_any[0], dict) and "bloques" in items_any[0]:
+        # agrupado
+        for it in items_any:
+            if not isinstance(it, dict): 
+                continue
+            dia = _norm_dia(it.get("dia_semana", it.get("dia", it.get("weekday", 0))))
+            intervalo = int(it.get("intervalo_min", it.get("intervalo", 30)) or 30)
+            activo = it.get("activo", True) is not False
             if not activo:
                 continue
-            for b in it["bloques"]:
-                if not isinstance(b, dict):
+            for b in as_list(it.get("bloques")):
+                d_raw = b.get("desde", b.get("inicio"))
+                h_raw = b.get("hasta", b.get("fin"))
+                d = _hhmm(d_raw)
+                h = _hhmm(h_raw)
+                if _to_minutes(d) >= _to_minutes(h):
                     continue
-                d = b.get("desde") or b.get("inicio") or b.get("hora_inicio")
-                h = b.get("hasta") or b.get("fin") or b.get("hora_fin")
-                if not d or not h:
-                    continue
-                flat.append({"dia_semana": dia, "desde": str(d), "hasta": str(h), "intervalo_min": intervalo_min})
-        else:
-            if activo is False:
+                planos.append({
+                    "dia_semana": dia,
+                    "desde": d, "hasta": h,
+                    "intervalo_min": intervalo,
+                })
+    else:
+        # plano
+        for r in as_list(items_any):
+            if not isinstance(r, dict):
                 continue
-            d = it.get("desde") or it.get("inicio") or it.get("hora_inicio")
-            h = it.get("hasta") or it.get("fin") or it.get("hora_fin")
+            dia = _norm_dia(r.get("dia_semana", r.get("dia", r.get("weekday", 0))))
+            intervalo = int(r.get("intervalo_min", r.get("intervalo", 30)) or 30)
+            d = _hhmm(r.get("desde", r.get("inicio")))
+            h = _hhmm(r.get("hasta", r.get("fin")))
             if not d or not h:
                 continue
-            flat.append({"dia_semana": dia, "desde": str(d), "hasta": str(h), "intervalo_min": intervalo_min})
-    return flat
+            if _to_minutes(d) >= _to_minutes(h):
+                continue
+            planos.append({
+                "dia_semana": dia,
+                "desde": d, "hasta": h,
+                "intervalo_min": intervalo,
+            })
 
-# --- Endpoints ---
+    # 5) Reemplazo total (si queda vacío, limpia)
+    try:
+        db.query(models.Horario).filter(models.Horario.emprendedor_id == emp.id).delete(synchronize_session=False)
+        for r in planos:
+            db.add(models.Horario(
+                emprendedor_id=emp.id,
+                dia_semana=_norm_dia(r["dia_semana"]),
+                inicio=_to_time(r["desde"]),
+                fin=_to_time(r["hasta"]),
+            ))
+        db.commit()
+    except Exception as ex:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"No se pudieron guardar los horarios: {ex}")
 
-@router.get("/mis")
-def list_mis_horarios(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
-    emp = _current_emprendedor(db, current_user)
-
-    q = db.query(Horario).filter(getattr(Horario, EMP_ID_COL) == emp.id)
-    # order_by flexible (si no existen columnas de tiempo, ordena por día solamente)
-    order_cols = [getattr(Horario, DIA_COL)]
-    if INICIO_COL:
-        order_cols.append(getattr(Horario, INICIO_COL))
-    q = q.order_by(*order_cols)
-
-    rows = q.all()
-
-    out = []
-    for r in rows:
-        dia_val = getattr(r, DIA_COL)
-        inicio_val = _fmt_time(getattr(r, INICIO_COL)) if INICIO_COL else ""
-        fin_val = _fmt_time(getattr(r, FIN_COL)) if FIN_COL else ""
-        intervalo_val = int(getattr(r, INTERVALO_COL)) if (INTERVALO_COL and getattr(r, INTERVALO_COL) is not None) else 30
-
-        out.append({
-            "id": getattr(r, "id", None),
-            "dia_semana": int(dia_val),
-            "desde": inicio_val,
-            "hasta": fin_val,
-            "intervalo_min": intervalo_val,
-            "activo": True,  # informativo
-        })
-    return out
-
-def _replace_core(payload: Dict[str, Any], db: Session, current_user: Usuario):
-    emp = _current_emprendedor(db, current_user)
-    flat = _normalize_payload_to_flat_items(payload)
-
-    # Borrar existentes
-    db.query(Horario).filter(getattr(Horario, EMP_ID_COL) == emp.id).delete(synchronize_session=False)
-
-    to_insert: List[Horario] = []
-    for it in flat:
-        try:
-            dia = int(it["dia_semana"])
-            d_time = _hhmm_to_time(it["desde"])
-            h_time = _hhmm_to_time(it["hasta"])
-            intervalo_min = int(it.get("intervalo_min", 30))
-
-            data = {
-                EMP_ID_COL: emp.id,
-                DIA_COL: dia,
-            }
-            if INICIO_COL:
-                data[INICIO_COL] = d_time
-            if FIN_COL:
-                data[FIN_COL] = h_time
-            if INTERVALO_COL:
-                data[INTERVALO_COL] = intervalo_min
-
-            to_insert.append(Horario(**data))
-        except Exception:
-            # Si un item viene mal, lo salteamos sin romper todo
-            continue
-
-    if to_insert:
-        db.bulk_save_objects(to_insert)
-    db.commit()
-    return {"ok": True, "items": len(to_insert)}
-
-@router.post("/mis")
-def replace_mis_horarios(payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
-    """
-    Reemplaza todos mis horarios. Acepta:
-    - Plano: {"items":[{"dia_semana":1,"desde":"09:00","hasta":"13:00","intervalo_min":30}, ...]}
-    - Agrupado: {"items":[{"dia_semana":1,"activo":true,"intervalo_min":30,"bloques":[{"desde":"09:00","hasta":"13:00"}]}]}
-    """
-    return _replace_core(payload, db, current_user)
-
-@router.post("/mis:replace")
-def replace_mis_horarios_alias(payload: Dict[str, Any] = Body(...), db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
-    return _replace_core(payload, db, current_user)
+    return get_mis_horarios(db=db, user=user)

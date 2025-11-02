@@ -1,12 +1,23 @@
-// src/components/SlotsPicker.jsx
 import { useMemo, useState } from "react";
 import { format, addDays, addMinutes, startOfDay, isBefore } from "date-fns";
 import es from "date-fns/locale/es";
-import { listarTurnosPublicos, reservarTurno } from "../services/turnos";
+import { agendaPublica, crearTurnoPublico } from "../api/publico";
 
 const money = new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 0 });
 const DIAS_LARGO = ["Domingo","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado"];
 
+// helpers
+const hhmmFromAny = (val) => {
+  // admite "HH:mm" o Date/Time serializado
+  if (!val) return null;
+  if (typeof val === "string") {
+    // si viene "HH:MM:SS" o "HH:MM"
+    const hhmm = val.slice(0,5);
+    return /^\d{2}:\d{2}$/.test(hhmm) ? hhmm : null;
+  }
+  // no forzamos más formatos
+  return null;
+};
 const toDateAt = (dayDate, hhmm) => {
   const [hh, mm] = String(hhmm || "00:00").split(":").map(Number);
   const d = new Date(dayDate);
@@ -15,8 +26,20 @@ const toDateAt = (dayDate, hhmm) => {
 };
 const overlaps = (a0, a1, b0, b1) => a0 < b1 && a1 > b0;
 
+// mapea un horario cualquiera a {desde, hasta}
+const mapHorario = (h) => {
+  // soporta {inicio, fin} (tu modelo actual) o {hora_desde, hora_hasta}
+  const desde = hhmmFromAny(h?.inicio) ?? hhmmFromAny(h?.hora_desde);
+  const hasta = hhmmFromAny(h?.fin)    ?? hhmmFromAny(h?.hora_hasta);
+  // step configurable si viene, sino 30
+  const intervalo = Number(h?.intervalo_min ?? h?.intervalo ?? 30) || 30;
+  const dia_semana = Number(h?.dia_semana ?? 0);
+  return { dia_semana, desde, hasta, intervalo };
+};
+
 export default function SlotsPicker({
   codigo,
+  emprendedorId,
   servicios = [],
   horarios = [],
   turnos = [],
@@ -29,18 +52,20 @@ export default function SlotsPicker({
   const [cliente, setCliente] = useState({ nombre: "", telefono: "" });
   const [booking, setBooking] = useState({ when: null, saving: false, ok: "", err: "" });
 
-  const servicioSel = useMemo(() => servicios.find(s => s.id === selServicioId) || null, [servicios, selServicioId]);
-  const duracionMin = useMemo(() => Number(servicioSel?.duracion_min || 0) || 30, [servicioSel]);
+  const servicioSel = useMemo(() => servicios.find(s => Number(s.id) === Number(selServicioId)) || null, [servicios, selServicioId]);
+  const duracionMin = useMemo(() => {
+    const d = Number(servicioSel?.duracion_min ?? servicioSel?.duracion_minutos ?? 0);
+    return d > 0 ? d : 30;
+  }, [servicioSel]);
 
   const turnosPorDia = useMemo(() => {
     const map = new Map();
     for (const t of turnos) {
-      const k = format(new Date(t.inicio), "yyyy-MM-dd");
+      const d0 = new Date(t.inicio);
+      const k = format(d0, "yyyy-MM-dd");
       const arr = map.get(k) || [];
-      arr.push({
-        inicio: new Date(t.inicio),
-        fin: new Date(t.fin ?? addMinutes(new Date(t.inicio), Number(t.duracion_min || 60))),
-      });
+      const fin = t.fin ? new Date(t.fin) : addMinutes(d0, Number(t.duracion_min ?? 60));
+      arr.push({ inicio: d0, fin });
       map.set(k, arr);
     }
     return map;
@@ -49,9 +74,9 @@ export default function SlotsPicker({
   const horariosPorDia = useMemo(() => {
     const m = new Map();
     for (let i = 0; i < 7; i++) m.set(i, []);
-    for (const h of horarios) {
-      const d = Number(h.dia_semana ?? 0);
-      m.get(d).push({ desde: h.hora_desde, hasta: h.hora_hasta, intervalo: Number(h.intervalo_min || 30) });
+    for (const raw of horarios) {
+      const h = mapHorario(raw);
+      if (h.desde && h.hasta) m.get(h.dia_semana).push(h);
     }
     for (const [, arr] of m) arr.sort((a,b) => (a.desde||"").localeCompare(b.desde||""));
     return m;
@@ -70,6 +95,7 @@ export default function SlotsPicker({
         const start = toDateAt(day, b.desde);
         const end   = toDateAt(day, b.hasta);
         const step  = Number(b.intervalo || 30) || 30;
+
         for (let t = new Date(start); addMinutes(t, duracionMin) <= end; t = addMinutes(t, step)) {
           const slotStart = new Date(t);
           const slotEnd = addMinutes(slotStart, duracionMin);
@@ -91,16 +117,22 @@ export default function SlotsPicker({
     try {
       const payload = {
         codigo,
-        servicio_id: servicioSel.id,
+        emprendedor_id: emprendedorId,           // opcional, pero ayuda si tu back lo acepta
+        servicio_id: Number(servicioSel.id),
         inicio: slot.start.toISOString(),
-        fin: slot.end.toISOString(),
-        cliente_nombre: cliente.nombre?.trim() || "Cliente",
-        cliente_telefono: cliente.telefono?.trim() || null,
+        // el back calcula fin con duracion_min; si querés enviar fin, dejalo:
+        // fin: slot.end.toISOString(),
+        cliente_nombre: (cliente.nombre || "Cliente").trim(),
+        cliente_contacto: (cliente.telefono || "").trim() || null,
       };
-      await reservarTurno(payload);
-      const rTur = await listarTurnosPublicos(codigo, desdeISO, hastaISO);
-      const lista = Array.isArray(rTur?.data) ? rTur.data : [];
-      onAfterReserve?.(lista);
+      await crearTurnoPublico(payload);
+
+      // refrescá agenda pública
+      if (emprendedorId && desdeISO && hastaISO) {
+        await agendaPublica({ emprendedor_id: emprendedorId, desde: desdeISO, hasta: hastaISO });
+      }
+      onAfterReserve?.(); // el padre puede volver a pedir agenda/servicios
+
       setBooking({ when: null, saving: false, ok: "¡Reserva confirmada!", err: "" });
       setTimeout(() => setBooking({ when: null, saving: false, ok: "", err: "" }), 2500);
     } catch (e) {
@@ -117,6 +149,7 @@ export default function SlotsPicker({
 
   return (
     <div className="grid gap-4">
+      {/* selector de servicio */}
       <div className="w-full max-w-xl mx-auto grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="sm:col-span-2">
           <label className="block text-xs font-semibold text-sky-700 mb-1">Servicio</label>
@@ -128,7 +161,7 @@ export default function SlotsPicker({
             {servicios.length === 0 && <option value="">No hay servicios configurados</option>}
             {servicios.map(s=>(
               <option key={s.id} value={s.id}>
-                {s.nombre} · {Number(s.duracion_min||0)} min {s.precio ? `· ${money.format(Number(s.precio||0))}` : ""}
+                {s.nombre} · {Number(s.duracion_min ?? s.duracion_minutos ?? 30)} min {s.precio ? `· ${money.format(Number(s.precio||0))}` : ""}
               </option>
             ))}
           </select>
@@ -141,6 +174,7 @@ export default function SlotsPicker({
         </div>
       </div>
 
+      {/* grilla de días/slots */}
       {servicioSel ? (
         <div className="grid md:grid-cols-2 gap-4">
           {dias.map(({ day, slots }) => (
@@ -170,6 +204,7 @@ export default function SlotsPicker({
         <div className="text-sm text-center text-slate-500">Primero elegí un servicio.</div>
       )}
 
+      {/* confirmación */}
       {booking.when && (
         <section className="rounded-2xl border-2 border-blue-200 bg-white p-4 md:p-5 shadow-sm">
           <div className="text-center">
@@ -184,7 +219,7 @@ export default function SlotsPicker({
                   value={cliente.nombre}
                   onChange={(e)=>setCliente(p=>({...p, nombre: e.target.value}))}
                   className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
-                  placeholder="Ej: Juan Pérez"
+                  placeholder="Ej: Cliente X"
                 />
               </div>
               <div>
@@ -193,7 +228,7 @@ export default function SlotsPicker({
                   value={cliente.telefono}
                   onChange={(e)=>setCliente(p=>({...p, telefono: e.target.value}))}
                   className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
-                  placeholder="Ej: +54 9 11 ..."
+                  placeholder="Ej: +54 9 ..."
                 />
               </div>
             </div>

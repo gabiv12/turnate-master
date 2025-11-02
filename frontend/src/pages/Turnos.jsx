@@ -7,15 +7,23 @@ import { useUser } from "../context/UserContext.jsx";
 import { isEmprendedor as empCheck } from "../utils/roles";
 import { format, startOfMonth, endOfMonth, startOfDay, endOfDay } from "date-fns";
 import es from "date-fns/locale/es";
+import {
+  listarTurnosOwner,
+  crearTurnoOwner,
+  borrarTurno,
+  actualizarTurnoOwner
+} from "../services/turnos";
 
 const cx = (...c) => c.filter(Boolean).join(" ");
 
-// =============== Helpers ===============
+// ===== Helpers =====
 function friendly(err) {
+  if (typeof err === "string") return err;
   const s = err?.response?.status;
+  const d = err?.response?.data;
   if (s === 401) return "Tu sesión se cerró. Iniciá sesión.";
   if (s === 403) return "No autorizado.";
-  const d = err?.response?.data;
+  if (s === 409) return (d?.detail || "Horario no disponible o fuera de bloque.");
   if (typeof d === "string") return d;
   if (d?.detail) return typeof d.detail === "string" ? d.detail : "Ocurrió un error.";
   return err?.message || "No disponible por el momento.";
@@ -25,52 +33,13 @@ const iso = (d) => (d instanceof Date ? d.toISOString() : new Date(d).toISOStrin
 const toLocalNaive = (date) => {
   const d = new Date(date);
   const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
-    d.getMinutes()
-  )}:${pad(d.getSeconds())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 };
+const sanitize = (s = "") => s.replace(/[<>]/g, "").trim();
+const enabledWeekdaysFrom = (horarios = []) =>
+  new Set(horarios.filter((h) => h?.activo !== false).map((h) => Number(h.dia_semana)));
 
-// =============== Descubrimiento de rutas ===============
-function replacePathParams(path, params = {}) {
-  if (!path) return path;
-  let out = path;
-  Object.entries(params).forEach(([k, v]) => {
-    out = out.replace(new RegExp(`{${k}}`, "g"), String(v));
-  });
-  return out;
-}
-async function discoverTurnoPaths() {
-  try {
-    const { data } = await api.get("/openapi.json");
-    const paths = data?.paths || {};
-    const entries = Object.entries(paths);
-    const kws = ["turno", "turnos", "reserva", "reservas"];
-    const hasKW = (p) => kws.some((k) => p.toLowerCase().includes(k));
-
-    const pick = (arr) =>
-      [
-        ...arr.filter(([p, _]) => /emprendedores\/{.*id.*}\/turnos\b/i.test(p)),
-        ...arr.filter(([p, _]) => /\/turnos\/?\b/i.test(p)),
-        ...arr.filter(([p, _]) => /\/reservas\/?\b/i.test(p)),
-        ...arr.filter(([p, _]) => /\/mis\b/i.test(p) || /mis-?turnos/i.test(p)),
-        ...arr,
-      ]
-        .map(([p]) => p)
-        .filter((v, i, a) => a.indexOf(v) === i)[0] || null;
-
-    const list = pick(entries.filter(([p, def]) => def?.get && hasKW(p)));
-    const create = pick(entries.filter(([p, def]) => def?.post && hasKW(p)));
-    const upd = pick(entries.filter(([p, def]) => (def?.put || def?.patch) && hasKW(p)));
-    const del = pick(entries.filter(([p, def]) => def?.delete && hasKW(p)));
-
-    const updMethod = paths[upd]?.put ? "put" : paths[upd]?.patch ? "patch" : "put";
-    return { list, create, upd, updMethod, del };
-  } catch {
-    return { list: null, create: null, upd: null, updMethod: "put", del: null };
-  }
-}
-
-// =============== Adaptadores ===============
+// ===== Mapeo a eventos de Calendario =====
 function mapTurnoParaCalendario(t, servicios = []) {
   const svc = servicios.find((s) => Number(s.id) === Number(t.servicio_id));
   const start =
@@ -92,12 +61,15 @@ function mapTurnoParaCalendario(t, servicios = []) {
     servicio: nombreServicio,
     cliente_nombre: cliente || "",
     notas: t.notas ?? t.nota ?? "",
+    // 🔹 NUEVO: pasamos contacto y estado para verlos en el modal y en agenda-hoy
+    cliente_contacto: t?.cliente_contacto ?? t?.contacto ?? "",
+    estado: t?.estado ?? "reservado",
     raw: t,
   };
 }
 
-// =============== Modales ===============
-function TurnoModal({ open, onClose, servicios, selected, onCreate, onUpdate }) {
+// ===== Modal (detalle / crear / posponer) =====
+function TurnoModal({ open, onClose, servicios, selected, onCreate, onUpdate, inlineMsg, busy }) {
   const isEdit = !!selected;
 
   const toLocalInput = (d) => {
@@ -106,24 +78,22 @@ function TurnoModal({ open, onClose, servicios, selected, onCreate, onUpdate }) 
     const mins = x.getMinutes();
     x.setMinutes(mins - (mins % 5));
     const pad = (n) => String(n).padStart(2, "0");
-    return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}T${pad(x.getHours())}:${pad(
-      x.getMinutes()
-    )}`;
+    return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}T${pad(x.getHours())}:${pad(x.getMinutes())}`;
   };
 
   const defaultSvcId = isEdit ? selected?.servicio_id ?? "" : servicios?.[0]?.id ?? "";
   const [servicioId, setServicioId] = useState(defaultSvcId || "");
   const [dtLocal, setDtLocal] = useState(toLocalInput(isEdit ? selected?.start : new Date()));
-  const [cliente, setCliente] = useState(isEdit ? selected?.cliente_nombre || "" : "");
-  const [notas, setNotas] = useState(isEdit ? selected?.notas || "" : "");
+  const [cliente, setCliente] = useState(isEdit ? (selected?.cliente_nombre || "") : "");
+  const [notas, setNotas] = useState(isEdit ? (selected?.notas || "") : "");
 
   useEffect(() => {
     if (!open) return;
     const dId = isEdit ? selected?.servicio_id ?? "" : servicios?.[0]?.id ?? "";
     setServicioId(dId || "");
     setDtLocal(toLocalInput(isEdit ? selected?.start : new Date()));
-    setCliente(isEdit ? selected?.cliente_nombre || "" : "");
-    setNotas(isEdit ? selected?.notas || "" : "");
+    setCliente(isEdit ? (selected?.cliente_nombre || "") : "");
+    setNotas(isEdit ? (selected?.notas || "") : "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, isEdit, selected?.id]);
 
@@ -132,19 +102,32 @@ function TurnoModal({ open, onClose, servicios, selected, onCreate, onUpdate }) 
     return Number(s?.duracion_min ?? s?.duracion_minutos ?? s?.duracion ?? 30) || 30;
   };
 
+  const valid = servicioId && dtLocal;
+
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/50 backdrop-blur-sm px-4">
       <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200">
         <div className="border-b px-5 py-4">
-          <h3 className="text-lg font-semibold text-slate-900">{isEdit ? "Editar turno" : "Nuevo turno"}</h3>
+          <h3 className="text-lg font-semibold text-slate-900">
+            {isEdit ? "Detalle de turno" : "Nuevo turno"}
+          </h3>
+          {isEdit && (
+            <p className="mt-1 text-xs text-slate-500">
+              {selected?.cliente_nombre ? <>Cliente: <b>{selected.cliente_nombre}</b> · </> : null}
+              Servicio: <b>{selected?.servicio || "Servicio"}</b>
+            </p>
+          )}
         </div>
 
         <div className="p-5 grid gap-4">
           <div>
             <label className="block text-xs font-semibold text-sky-700 mb-1">Servicio</label>
-            <select className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
-              value={servicioId} onChange={(e) => setServicioId(e.target.value)}>
+            <select
+              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
+              value={servicioId}
+              onChange={(e) => setServicioId(e.target.value)}
+            >
               <option value="">Elegí un servicio</option>
               {servicios.map((s) => (
                 <option key={s.id} value={s.id}>
@@ -174,7 +157,7 @@ function TurnoModal({ open, onClose, servicios, selected, onCreate, onUpdate }) 
             <input
               className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
               value={cliente}
-              onChange={(e) => setCliente(e.target.value)}
+              onChange={(e) => setCliente(sanitize(e.target.value))}
               placeholder="Cliente X"
             />
           </div>
@@ -184,66 +167,108 @@ function TurnoModal({ open, onClose, servicios, selected, onCreate, onUpdate }) 
             <input
               className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
               value={notas}
-              onChange={(e) => setNotas(e.target.value)}
-              placeholder="Dirección / referencia, etc."
+              onChange={(e) => setNotas(sanitize(e.target.value))}
+              placeholder="Dirección / referencia (se guarda y el emprendedor la ve)"
+              maxLength={220}
             />
+          </div>
+
+          {/* 🔹 NUEVO: detalles informativos, sin inputs (no cambia UI principal) */}
+          {isEdit && (
+            <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200/70 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <div className="text-slate-500">Estado</div>
+                  <div className="font-medium text-slate-900">{selected?.estado || "reservado"}</div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Contacto</div>
+                  <div className="font-medium text-slate-900">{selected?.cliente_contacto || "—"}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Tips mini e intuitivos */}
+          <div className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200/70 text-xs text-slate-600">
+            • Elegí servicio y fecha/hora. • La duración sale del servicio. • Si choca con otro turno, probá 5–10 min después.
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 px-5 py-4 border-t">
-          <button type="button" onClick={onClose}
-            className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50">
-            Cancelar
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-t">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50"
+            disabled={busy}
+          >
+            Cerrar
           </button>
 
-          {!isEdit ? (
-            <button
-              type="button"
-              onClick={() => {
-                const dur = duracionServicioMin();
-                const start = new Date(dtLocal);
-                const end = new Date(start.getTime() + dur * 60000);
-                onCreate?.({
-                  servicio_id: Number(servicioId),
-                  inicio: start.toISOString(),
-                  fin: end.toISOString(),
-                  cliente_nombre: (cliente || "").trim(),
-                  notas: (notas || "").trim(),
-                });
-              }}
-              className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700"
-              disabled={!servicioId || !dtLocal}
-            >
-              Crear
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => {
-                const dur = duracionServicioMin();
-                const start = new Date(dtLocal);
-                const end = new Date(start.getTime() + dur * 60000);
-                onUpdate?.({
-                  servicio_id: Number(servicioId),
-                  inicio: start.toISOString(),
-                  fin: end.toISOString(),
-                  cliente_nombre: (cliente || "").trim(),
-                  notas: (notas || "").trim(),
-                });
-              }}
-              className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700"
-              disabled={!servicioId || !dtLocal}
-            >
-              Guardar
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {inlineMsg && (
+              <span
+                className={
+                  "text-sm rounded-lg px-3 py-2 " +
+                  (/(error|No se pudo|403|404|405|409|500)/i.test(inlineMsg)
+                    ? "bg-red-50 text-red-700 ring-1 ring-red-200"
+                    : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200")
+                }
+              >
+                {String(inlineMsg)}
+              </span>
+            )}
+
+            {!isEdit ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const dur = duracionServicioMin();
+                  const start = new Date(dtLocal);
+                  const end = new Date(start.getTime() + dur * 60000);
+                  onCreate?.({
+                    servicio_id: Number(servicioId),
+                    inicio: start.toISOString(),
+                    fin: end.toISOString(),
+                    cliente_nombre: sanitize(cliente),
+                    notas: sanitize(notas),
+                  });
+                }}
+                className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700 disabled:opacity-60"
+                disabled={busy || !valid}
+              >
+                Crear
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  const dur = duracionServicioMin();
+                  const start = new Date(dtLocal);
+                  const end = new Date(start.getTime() + dur * 60000);
+                  onUpdate?.({
+                    servicio_id: Number(servicioId),
+                    inicio: start.toISOString(),
+                    fin: end.toISOString(),
+                    cliente_nombre: sanitize(cliente),
+                    notas: sanitize(notas),
+                  });
+                }}
+                className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700 disabled:opacity-60"
+                disabled={busy || !valid}
+                title="Guardar cambios / Posponer"
+              >
+                Guardar
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-// =============== Página ===============
+// ===== Página =====
 export default function Turnos() {
   const navigate = useNavigate();
   const { user } = useUser();
@@ -255,12 +280,12 @@ export default function Turnos() {
   const [eventos, setEventos] = useState([]);
   const [rawTurnos, setRawTurnos] = useState([]);
 
-  const [paths, setPaths] = useState({ list: null, create: null, upd: null, updMethod: "put", del: null });
-
   const [selected, setSelected] = useState(null);
   const [openNew, setOpenNew] = useState(false);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
+
+  const [ignoreBlocks, setIgnoreBlocks] = useState(false);
 
   const [rStart, setRStart] = useState(() => {
     const d = new Date();
@@ -278,9 +303,7 @@ export default function Turnos() {
   // Catálogos
   useEffect(() => {
     (async () => {
-      if (!isEmp) {
-        setServicios([]); setHorarios([]); return;
-      }
+      if (!isEmp) { setServicios([]); setHorarios([]); return; }
       try {
         const rs = await api.get("/servicios/mis");
         setServicios(Array.isArray(rs.data?.items) ? rs.data.items : Array.isArray(rs.data) ? rs.data : []);
@@ -292,15 +315,12 @@ export default function Turnos() {
     })();
   }, [isEmp]);
 
-  // Descubrir rutas + primera carga
+  // Primera carga
   const firstRef = useRef(false);
   useEffect(() => {
     (async () => {
       if (firstRef.current) return;
       firstRef.current = true;
-      try {
-        setPaths(await discoverTurnoPaths());
-      } catch {}
       await fetchTurnosRange(rStart, rEnd);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -311,32 +331,10 @@ export default function Turnos() {
     setEventos(rawTurnos.map((t) => mapTurnoParaCalendario(t, servicios)));
   }, [servicios, rawTurnos]);
 
-  // ==== Lister tolerante
-  async function listTurnos(start, end, empId = null) {
-    // 1) OpenAPI (si existe)
-    if (paths.list) {
-      const p = replacePathParams(paths.list, { id: empId, emprendedor_id: empId });
-      try {
-        const r = await api.get(p, { params: { desde: iso(start), hasta: iso(end) } });
-        const arr = Array.isArray(r.data?.items) ? r.data.items : Array.isArray(r.data) ? r.data : [];
-        return arr.map((t) => mapTurnoParaCalendario(t, servicios));
-      } catch {}
-    }
-    // 2) Fallbacks
-    const tries = [
-      () => api.get("/turnos/mis", { params: { desde: iso(start), hasta: iso(end) } }),
-      () => api.get("/turnos", { params: { desde: iso(start), hasta: iso(end), mine: true } }),
-      () => api.get(`/emprendedores/${empId || 0}/turnos`, { params: { desde: iso(start), hasta: iso(end) } }),
-      () => api.get("/reservas/mis", { params: { desde: iso(start), hasta: iso(end) } }),
-    ];
-    for (const fn of tries) {
-      try {
-        const r = await fn();
-        const arr = Array.isArray(r.data?.items) ? r.data.items : Array.isArray(r.data) ? r.data : [];
-        return arr.map((t) => mapTurnoParaCalendario(t, servicios));
-      } catch {}
-    }
-    return [];
+  // ==== Listar
+  async function listTurnos(start, end) {
+    const arr = await listarTurnosOwner({ desde: iso(start), hasta: iso(end) });
+    return arr.map((t) => mapTurnoParaCalendario(t, servicios));
   }
 
   async function fetchTurnosRange(start, end) {
@@ -355,133 +353,40 @@ export default function Turnos() {
     }
   }
 
-  // ==== CRUD tolerante
-  async function createTurno(payload) {
-    const bodyStd = {
-      servicio_id: Number(payload.servicio_id),
-      inicio: payload.inicio,
-      fin: payload.fin,
-      cliente_nombre: payload.cliente_nombre || undefined,
-      notas: payload.notas || undefined,
-    };
-    const empId = null; // si luego necesitas, podés traer /usuarios/me/emprendedor
-    // 1) OpenAPI
-    if (paths.create) {
-      const p = replacePathParams(paths.create, { id: empId, emprendedor_id: empId });
-      try { await api.post(p, bodyStd); return; } catch {}
-    }
-    // 2) Fallbacks + variantes de payload
-    const tries = [
-      () => api.post("/turnos", bodyStd),
-      () => api.post("/turnos", { ...bodyStd, datetime: bodyStd.inicio, fin: undefined }),
-      () => api.post("/turnos", { ...bodyStd, desde: bodyStd.inicio, hasta: bodyStd.fin }),
-      () => api.post(`/emprendedores/${empId || 0}/turnos`, bodyStd),
-      () => api.post("/reservas", { ...bodyStd }),
-    ];
-    for (const fn of tries) { try { await fn(); return; } catch {} }
-    throw new Error("No se pudo crear el turno.");
-  }
-
-  async function updateTurno(id, payload) {
-    const bodyStd = {
-      servicio_id: Number(payload.servicio_id),
-      inicio: payload.inicio,
-      fin: payload.fin,
-      cliente_nombre: payload.cliente_nombre || undefined,
-      notas: payload.notas || undefined,
-    };
-    const empId = null;
-
-    if (paths.upd) {
-      const p = replacePathParams(paths.upd, { id, turno_id: id, emprendedor_id: empId });
-      try { return paths.updMethod === "patch" ? await api.patch(p, bodyStd) : await api.put(p, bodyStd); } catch {}
-    }
-    const tries = [
-      () => api.patch(`/turnos/${id}`, bodyStd),
-      () => api.put(`/turnos/${id}`, bodyStd),
-      () => api.patch(`/turnos/${id}`, { ...bodyStd, datetime: bodyStd.inicio, fin: undefined }),
-      () => api.patch(`/turnos/${id}`, { ...bodyStd, desde: bodyStd.inicio, hasta: bodyStd.fin }),
-      () => api.patch(`/emprendedores/${empId || 0}/turnos/${id}`, bodyStd),
-    ];
-    for (const fn of tries) { try { await fn(); return; } catch {} }
-    throw new Error("No se pudo actualizar el turno.");
-  }
-
-  async function deleteTurno(id) {
-    const empId = null;
-    if (paths.del) {
-      const p = replacePathParams(paths.del, { id, turno_id: id, emprendedor_id: empId });
-      try { await api.delete(p); return; } catch {}
-    }
-    const tries = [
-      () => api.delete(`/turnos/${id}`),
-      () => api.delete(`/emprendedores/${empId || 0}/turnos/${id}`),
-    ];
-    for (const fn of tries) { try { await fn(); return; } catch {} }
-    throw new Error("No se pudo eliminar el turno.");
-  }
-
-  // ===== Calendario handlers
-  const handleRangeRequest = async (start, end) => {
-    setRStart(start); setREnd(end);
-    await fetchTurnosRange(start, end);
-  };
-  const onSelectEvent = (evt) => { setSelected(evt); setOpenNew(true); };
-  const onSelectSlot = () => { setSelected(null); setOpenNew(true); };
-
-  // ===== Días hábiles (gris en no activos)
-  const enabledWeekdays = useMemo(() => {
-    const set = new Set(
-      (horarios || []).filter((h) => h.activo !== false).map((h) => Number(h.dia_semana))
-    );
-    return set;
-  }, [horarios]);
-  const dayPropGetter = (date) => {
-    const wd = date.getDay();
-    if (!enabledWeekdays.has(wd)) {
-      return { style: { backgroundColor: "#f3f4f6", color: "#9ca3af" } };
-    }
-    return {};
-  };
-
-  // ===== Acciones botón modal
+  // ==== CRUD
   const crearTurno = async (payload) => {
     try {
-      setLoading(true); setMsg("");
-      // convertir a formato local (por si el backend lo espera así)
-      const inicioISO = payload.inicio;
-      const finISO = payload.fin;
+      setLoading(true); setMsg("Creando turno…");
       try {
-        await createTurno({ ...payload, inicio: inicioISO, fin: finISO });
-      } catch (e1) {
-        // reintento con naive local
-        await createTurno({
-          ...payload,
-          inicio: toLocalNaive(inicioISO),
-          fin: toLocalNaive(finISO),
-        });
+        await crearTurnoOwner(payload); // ISO
+      } catch {
+        await crearTurnoOwner({ ...payload, inicio: toLocalNaive(payload.inicio), fin: toLocalNaive(payload.fin) });
       }
+      setMsg("Turno creado.");
       await fetchTurnosRange(rStart, rEnd);
       setOpenNew(false); setSelected(null);
     } catch (e) {
       setMsg(friendly(e));
     } finally {
       setLoading(false);
-      setTimeout(() => setMsg(""), 2600);
+      setTimeout(() => setMsg(""), 2800);
     }
   };
 
   const editarTurno = async (payload) => {
     if (!selected?.id) return;
     try {
-      setLoading(true); setMsg("");
-      const inicioISO = payload.inicio;
-      const finISO = payload.fin;
+      setLoading(true); setMsg("Guardando cambios…");
       try {
-        await updateTurno(selected.id, { ...payload, inicio: inicioISO, fin: finISO });
+        await actualizarTurnoOwner(selected.id, payload);
       } catch {
-        await updateTurno(selected.id, { ...payload, inicio: toLocalNaive(inicioISO), fin: toLocalNaive(finISO) });
+        await actualizarTurnoOwner(selected.id, {
+            ...payload,
+            inicio: toLocalNaive(payload.inicio),
+            fin: toLocalNaive(payload.fin),
+        });
       }
+      setMsg("Turno actualizado.");
       await fetchTurnosRange(rStart, rEnd);
       setOpenNew(false); setSelected(null);
     } catch (e) {
@@ -496,10 +401,11 @@ export default function Turnos() {
     if (!selected?.id) return;
     if (!confirm("¿Eliminar el turno seleccionado?")) return;
     try {
-      setLoading(true); setMsg("");
-      await deleteTurno(selected.id);
+      setLoading(true); setMsg("Eliminando turno…");
+      await borrarTurno(selected.id);
       await fetchTurnosRange(rStart, rEnd);
       setSelected(null);
+      setMsg("Turno cancelado.");
     } catch (e) {
       setMsg(friendly(e));
     } finally {
@@ -508,15 +414,28 @@ export default function Turnos() {
     }
   };
 
-  // ===== Agenda de hoy
-  const agendaDeHoy = useMemo(() => {
-    const d = new Date();
-    const s = startOfDay(d);
-    const e = endOfDay(d);
-    return eventos.filter((ev) => ev.start >= s && ev.start <= e).sort((a, b) => a.start - b.start);
-  }, [eventos]);
+  // ==== Calendario
+  const enabledWeekdays = useMemo(() => enabledWeekdaysFrom(horarios), [horarios]);
 
-  // ===== Render
+  const dayPropGetter = (date) => {
+    const wd = date.getDay();
+    const allowed = enabledWeekdays.has(wd);
+    return allowed || ignoreBlocks
+      ? {}
+      : { style: { backgroundColor: "#f3f4f6", color: "#9ca3af", cursor: "not-allowed" } };
+  };
+
+  const handleRangeRequest = async (start, end) => {
+    setRStart(start); setREnd(end);
+    await fetchTurnosRange(start, end);
+  };
+
+  const onSelectEvent = (evt) => { setSelected(evt); setOpenNew(true); };
+
+  // Tu componente Calendario a veces no pasa el slot/start; abrimos modal vacío y elige fecha/hora ahí.
+  const onSelectSlot = () => { setSelected(null); setOpenNew(true); };
+
+  // ===== Render no-emprendedor
   if (!isEmp) {
     return (
       <div className="space-y-4">
@@ -545,6 +464,7 @@ export default function Turnos() {
     );
   }
 
+  // ===== Render emprendedor
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -583,6 +503,9 @@ export default function Turnos() {
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4 items-start">
         <div className="min-w-0">
           <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
+            
+            
+
             <Calendario
               turnos={eventos}
               onSelectEvent={(e) => { setSelected(e); setOpenNew(true); }}
@@ -618,10 +541,10 @@ export default function Turnos() {
 
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 font-medium text-slate-700">Acciones de turnos</div>
-            <ul className="mb-3 text-xs text-slate-500 space-y-1.5">
-              <li>• Para <b>agregar</b>, seleccioná un bloque en el calendario o usá el botón.</li>
-              <li>• Para <b>editar</b> o <b>posponer</b>, hacé click en un turno y luego “Guardar”.</li>
-              <li>• Para <b>cancelar</b>, seleccioná un turno y tocá “Cancelar”.</li>
+            <ul className="mb-3 text-xs text-slate-600 space-y-1.5">
+              <li>• <b>Agregar</b>: seleccioná un bloque o usá “+ Agregar turno”.</li>
+              <li>• <b>Editar / Posponer</b>: clic en un turno → “Guardar”.</li>
+              <li>• <b>Cancelar</b>: seleccioná un turno y tocá “Cancelar”.</li>
             </ul>
 
             <div className="grid grid-cols-1 gap-2">
@@ -651,42 +574,60 @@ export default function Turnos() {
                 Actualizar
               </button>
             </div>
+
+            {msg && (
+              <div
+                className={`mt-3 rounded-xl px-3 py-2 text-sm ${
+                  /cerró|error|No se pudo|403|404|405|409|500/i.test(msg)
+                    ? "bg-red-50 text-red-700 ring-1 ring-red-200"
+                    : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                }`}
+              >
+                {msg}
+              </div>
+            )}
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 font-medium text-slate-700">
               Agenda de hoy · {format(new Date(), "EEEE d 'de' MMMM", { locale: es })}
             </div>
-            {agendaDeHoy.length === 0 ? (
+            {eventos.filter((e) => {
+              const d = new Date(); const s = startOfDay(d); const ee = endOfDay(d);
+              return e.start >= s && e.start <= ee;
+            }).length === 0 ? (
               <div className="text-sm text-slate-500">No hay turnos para hoy.</div>
             ) : (
               <ul className="divide-y divide-slate-100">
-                {agendaDeHoy.map((e) => (
-                  <li key={e.id} className="py-2">
-                    <div className="font-medium">
-                      {format(e.start, "HH:mm", { locale: es })} · {e.cliente_nombre || "Cliente"} · {e.servicio || e.title}
-                    </div>
-                    {e.notas && <div className="text-slate-500 text-xs mt-0.5">Notas: {e.notas}</div>}
-                  </li>
+                {eventos
+                  .filter((e) => { const d = new Date(); const s = startOfDay(d); const ee = endOfDay(d); return e.start >= s && e.start <= ee; })
+                  .sort((a, b) => a.start - b.start)
+                  .map((e) => (
+                    <li key={e.id} className="py-2">
+                      <div className="font-medium">
+                        {format(e.start, "HH:mm", { locale: es })} · {e.cliente_nombre || "Cliente"} · {e.servicio || e.title}
+                      </div>
+                      {e.cliente_contacto && <div className="text-slate-500 text-xs mt-0.5">Contacto: {e.cliente_contacto}</div>}
+                      {e.notas && <div className="text-slate-500 text-xs mt-0.5">Notas: {e.notas}</div>}
+                    </li>
                 ))}
               </ul>
             )}
+
+            {/* Sugerencias simples e intuitivas */}
+            <div className="mt-3 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200/70">
+              <div className="text-xs font-semibold text-slate-700 mb-1">Sugerencias</div>
+              <ul className="text-xs text-slate-600 space-y-1.5">
+                <li>• Configurá tus <b>Horarios</b>; los días no habilitados se ven en gris.</li>
+                <li>• La <b>duración</b> sale del servicio elegido.</li>
+                <li>• Si hay choque, el sistema marca <b>409</b>. Probá mover 5–10 min.</li>
+              </ul>
+            </div>
           </div>
         </aside>
       </div>
 
-      {msg && (
-        <div
-          className={`rounded-xl px-4 py-2 text-sm ${
-            /cerró|error|No se pudo|403|404|405|500/i.test(msg)
-              ? "bg-red-50 text-red-700 ring-1 ring-red-200"
-              : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
-          }`}
-        >
-          {msg}
-        </div>
-      )}
-
+      {/* Modal */}
       <TurnoModal
         open={openNew}
         onClose={() => { setOpenNew(false); setSelected(null); }}
@@ -694,6 +635,8 @@ export default function Turnos() {
         selected={selected}
         onCreate={crearTurno}
         onUpdate={editarTurno}
+        inlineMsg={msg}
+        busy={loading}
       />
     </div>
   );

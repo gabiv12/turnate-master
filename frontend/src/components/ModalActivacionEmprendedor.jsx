@@ -1,21 +1,7 @@
 // src/components/ModalActivacionEmprendedor.jsx
 import React, { useEffect, useState } from "react";
-import api from "../services/api";
-
-// Ruta oficial del backend que ya tenés implementada:
-// PUT /usuarios/{id}/activar_emprendedor
-async function activarBackOficial(userId) {
-  return api.put(`/usuarios/${userId}/activar_emprendedor`);
-}
-
-async function postEmprendedorFallback() {
-  // Por compatibilidad si tu front intenta crear directo
-  return api.post(`/emprendedores`, { nombre: "Mi negocio", descripcion: "" });
-}
-
-async function generarCodigo(id) {
-  return api.post(`/emprendedores/${id}/generar-codigo`);
-}
+import { activarEmprendedor, me } from "../services/usuarios.js";
+import { miEmprendedor } from "../services/emprendedores.js";
 
 export default function ModalActivacionEmprendedor({ open, onClose, userId, onActivated }) {
   const [loading, setLoading] = useState(false);
@@ -24,40 +10,67 @@ export default function ModalActivacionEmprendedor({ open, onClose, userId, onAc
 
   useEffect(() => {
     let t;
-    if (msg || err) t = setTimeout(() => { setMsg(""); setErr(""); }, 2800);
+    if (msg || err) t = setTimeout(() => { setMsg(""); setErr(""); }, 2500);
     return () => clearTimeout(t);
   }, [msg, err]);
 
   if (!open) return null;
 
-  const activar = async () => {
-    if (!userId) {
-      setErr("Tenés que iniciar sesión primero.");
-      return;
-    }
-    setLoading(true);
-    setMsg("");
-    setErr("");
-
+  async function tryActivateWithRetries(uid) {
+    // 1) Intento normal
     try {
-      // 1) Intento ruta oficial
-      let data = null;
-      try {
-        const r = await activarBackOficial(userId);
-        data = r?.data || null;
-      } catch {
-        // 2) Fallback: crear Emprendedor y generar código
-        const r1 = await postEmprendedorFallback();
-        const emp = r1?.data;
-        if (!emp?.id) throw new Error("No se pudo crear el emprendimiento.");
-        try { await generarCodigo(emp.id); } catch {}
-        data = { user: null, emprendedor: emp };
+      console.info("[MODAL] activar -> intento 1");
+      await activarEmprendedor(uid);
+      return true;
+    } catch (e1) {
+      const s1 = e1?.response?.status ?? e1?._info?.status;
+      console.warn("[MODAL] activar intento 1 fallo", s1);
+      // 2) Si 401, refresco /me y reintento
+      if (s1 === 401) {
+        try {
+          console.info("[MODAL] refresh /usuarios/me y reintento");
+          await me(); // revalida sesión y actualiza user en LS
+        } catch {}
+        try {
+          console.info("[MODAL] activar -> intento 2");
+          await activarEmprendedor(uid);
+          return true;
+        } catch (e2) {
+          const s2 = e2?.response?.status ?? e2?._info?.status;
+          console.warn("[MODAL] activar intento 2 fallo", s2);
+          throw e2;
+        }
       }
+      throw e1;
+    }
+  }
 
-      onActivated?.(data);
-      setMsg("¡Listo! Ya podés cargar datos y compartir tu link.");
-    } catch {
-      setErr("No se pudo activar. Probá de nuevo en un momento.");
+  const activar = async () => {
+    if (!userId) { setErr("Tenés que iniciar sesión primero."); return; }
+    setLoading(true); setMsg(""); setErr("");
+    try {
+      // Activa el plan con reintentos controlados (maneja 401 internamente)
+      await tryActivateWithRetries(userId);
+
+      // Trae el emprendedor resultante (GET /emprendedores/mi con fallback interno)
+      let emp = null;
+      try {
+        emp = await miEmprendedor();
+      } catch {}
+
+      // Avisá al padre
+      onActivated?.({ emprendedor: emp || null });
+
+      setMsg("¡Listo! Ya podés cargar servicios y horarios.");
+      // Opcional: cerrar al confirmar; como no tocamos UI, dejamos que el padre cierre si corresponde
+      // onClose?.();
+    } catch (e) {
+      const st = e?.response?.status ?? e?._info?.status;
+      setErr(st === 401
+        ? "Sesión inválida o vencida. Iniciá sesión e intentá de nuevo."
+        : st === 403
+        ? "No autorizado."
+        : "No se pudo activar. Probá de nuevo.");
     } finally {
       setLoading(false);
     }
@@ -67,16 +80,15 @@ export default function ModalActivacionEmprendedor({ open, onClose, userId, onAc
     <div className="fixed inset-0 z-[1000] bg-black/55 p-4" onClick={onClose}>
       <div
         className="mx-auto mt-10 w-full max-w-3xl overflow-hidden rounded-3xl bg-white shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
+        onClick={(e)=>e.stopPropagation()}
       >
-        {/* Header brand */}
         <div className="relative bg-gradient-to-r from-blue-700 via-sky-600 to-emerald-500 px-6 py-8 text-white">
           <div className="flex items-center justify-center gap-3">
             <img
               src="/images/TurnateLogo.png"
               alt="Turnate"
               className="h-10 w-auto drop-shadow"
-              onError={(e) => (e.currentTarget.style.display = "none")}
+              onError={(e)=> (e.currentTarget.style.display="none")}
             />
             <span className="text-2xl font-extrabold tracking-tight">Turnate</span>
           </div>
@@ -84,27 +96,21 @@ export default function ModalActivacionEmprendedor({ open, onClose, userId, onAc
             Activá tu plan Emprendedor
           </h2>
           <p className="mt-1 text-center text-white/90">
-            Recibí reservas con un link público, configurá tus horarios y ordená tu agenda.
+            Link público, servicios, horarios y agenda del día.
           </p>
         </div>
 
-        {/* Body */}
         <div className="grid gap-6 p-6 md:grid-cols-2">
-          {/* Benefits */}
           <div className="rounded-2xl border border-slate-200 p-5 shadow-sm">
             <div className="text-sm font-semibold text-slate-700">¿Qué incluye?</div>
             <ul className="mt-3 space-y-2 text-slate-700 text-sm">
-              <li>• Link público para que tus clientes reserven.</li>
+              <li>• Link público para reservas.</li>
               <li>• Gestión de <strong>Servicios</strong> y <strong>Horarios</strong>.</li>
-              <li>• Agenda simple del día y control de solapados.</li>
+              <li>• Agenda del día sin solapados.</li>
               <li>• Podés regenerar tu código cuando quieras.</li>
             </ul>
-            <div className="mt-4 text-xs text-slate-500">
-              El plan se activa ahora y ya podés cargar tus datos.
-            </div>
           </div>
 
-          {/* Actions */}
           <div className="rounded-2xl border border-slate-200 p-5 shadow-sm">
             {(err || msg) && (
               <div
@@ -117,15 +123,13 @@ export default function ModalActivacionEmprendedor({ open, onClose, userId, onAc
                 {err || msg}
               </div>
             )}
-
             <button
               onClick={activar}
               disabled={loading}
-              className="w-full rounded-xl bg-gradient-to-r from-blue-600 to-emerald-400 py-3 font-bold text-white shadow ring-1 ring-blue-300/50 transition hover:scale-[1.01] disabled:opacity-60"
+              className="w-full rounded-xl bg-gradient-to-r from-blue-600 to-emerald-400 py-3 font-bold text-white shadow ring-1 ring-blue-300/50 hover:scale-[1.01] disabled:opacity-60"
             >
               {loading ? "Activando…" : "Activar ahora"}
             </button>
-
             <button
               onClick={onClose}
               disabled={loading}
@@ -133,9 +137,8 @@ export default function ModalActivacionEmprendedor({ open, onClose, userId, onAc
             >
               Cancelar
             </button>
-
             <p className="mt-3 text-center text-[11px] text-slate-500">
-              Al activar, se habilitan los módulos de Turnos, Servicios, Horarios y Estadísticas.
+              Se habilitan Turnos, Servicios, Horarios y el enlace público.
             </p>
           </div>
         </div>

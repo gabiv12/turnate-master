@@ -1,6 +1,6 @@
 // src/pages/Horarios.jsx
 import { useEffect, useState } from "react";
-import api from "../services/api";
+import api, { errorMessage } from "../services/api";
 import { useUser } from "../context/UserContext.jsx";
 
 const BTN =
@@ -20,6 +20,7 @@ const DAYS = [
 ];
 
 function friendly(err) {
+  if (typeof err === "string") return err;
   const s = err?.response?.status;
   if (s === 401) return "Tu sesión se cerró. Iniciá sesión.";
   if (s === 403) return "No autorizado.";
@@ -45,20 +46,21 @@ function normalizeIn(data) {
       intervalo_min: Number(h.intervalo_min ?? h.intervalo ?? 30),
       bloques: [],
     };
-    row.activo = row.activo || h.activo !== false;
     row.intervalo_min = Number(h.intervalo_min ?? h.intervalo ?? row.intervalo_min ?? 30);
-    row.bloques.push({ desde: hhmm(h.desde), hasta: hhmm(h.hasta) });
+    (h.bloques || []).forEach((b) => {
+      row.bloques.push({ desde: hhmm(b.desde), hasta: hhmm(b.hasta) });
+    });
+    // activo si hay algún bloque válido
+    row.activo = row.activo || row.bloques.some((b) => {
+      const [h1, m1] = hhmm(b.desde).split(":").map(Number);
+      const [h2, m2] = hhmm(b.hasta).split(":").map(Number);
+      return h1 * 60 + m1 < h2 * 60 + m2;
+    });
     grouped.set(d, row);
   });
 
-  // Si un día no viene en la respuesta -> inactivo por defecto
   return DAYS.map((d) =>
-    grouped.get(d.i) || {
-      dia_semana: d.i,
-      activo: false,
-      intervalo_min: 30,
-      bloques: [], // sin bloques => cerrado
-    }
+    grouped.get(d.i) || { dia_semana: d.i, activo: false, intervalo_min: 30, bloques: [] }
   );
 }
 
@@ -97,10 +99,7 @@ export default function Horarios() {
       setLoading(true);
       setMsg("");
       try {
-        // Garantiza que el usuario tenga emprendedor (opcional; si no, el GET /horarios/mis igual fallaría)
-        try {
-          await api.get("/usuarios/me/emprendedor");
-        } catch {}
+        try { await api.get("/usuarios/me/emprendedor"); } catch {}
         const { data } = await api.get("/horarios/mis");
         setRows(normalizeIn(data));
       } catch (e) {
@@ -143,7 +142,7 @@ export default function Horarios() {
         const a = h1 * 60 + m1;
         const z = h2 * 60 + m2;
         if (a >= z) {
-          return `En ${DAYS.find((d) => d.i === r.dia_semana)?.name}: la hora "Desde" debe ser menor que "Hasta".`;
+          return `En ${DAYS.find((d) => d.i === r.dia_semana)?.name}: "Desde" debe ser menor que "Hasta".`;
         }
       }
     }
@@ -156,25 +155,22 @@ export default function Horarios() {
     setMsg("");
     try {
       const v = validateRows(rows);
-      if (v) {
-        setMsg(v);
-        setLoading(false);
-        return;
-      }
+      if (v) { setMsg(v); setLoading(false); return; }
+
+      // si está inactivo, mandamos bloques vacíos (el back limpia)
       const payload = normalizeOut(
-        rows.map((r) => ({
-          ...r,
-          // si está inactivo, no mandamos bloques (queda cerrado)
-          bloques: r.activo ? r.bloques : [],
-        }))
+        rows.map((r) => ({ ...r, bloques: r.activo ? r.bloques : [] }))
       );
+
       await api.post("/horarios/mis", payload);
-      setMsg("Horarios guardados.");
-      // refrescar para ver lo que quedó efectivamente persistido
+
+      // refrescar para ver lo persistido
       const { data } = await api.get("/horarios/mis");
       setRows(normalizeIn(data));
+      setMsg("Horarios guardados.");
     } catch (e) {
-      setMsg(friendly(e));
+      // e ya llega como string desde el interceptor
+      setMsg(typeof e === "string" ? e : errorMessage(e));
     } finally {
       setLoading(false);
       setTimeout(() => setMsg(""), 2500);
@@ -183,39 +179,24 @@ export default function Horarios() {
 
   return (
     <div className="space-y-4">
-      {/* Header coherente con el resto */}
       <div className="-mx-4 lg:-mx-6 overflow-x-clip">
         <div className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow">
           <div className="mx-auto max-w-7xl px-4 lg:px-6">
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Horarios</h1>
             <p className="text-sm md:text-base/relaxed opacity-90">
-              Activá los días laborales y agregá uno o más bloques (por ejemplo, mañana y tarde). Elegí el
-              intervalo para generar turnos dentro de cada bloque.
+              Activá los días laborales y agregá uno o más bloques (por ejemplo, mañana y tarde).
             </p>
           </div>
         </div>
       </div>
 
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        {msg && (
-          <div
-            className={`mb-4 rounded-xl px-4 py-2 text-sm ${
-              /cerró|error|No se pudo|403|404|405|422|500/i.test(msg)
-                ? "bg-red-50 text-red-700 ring-1 ring-red-200"
-                : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
-            }`}
-          >
-            {msg}
-          </div>
-        )}
-
-        {/* Dos columnas en escritorio, una en móvil */}
+        {/* grilla de días */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           {rows.map((r, idx) => {
             const d = DAYS.find((x) => x.i === r.dia_semana);
             return (
               <div key={r.dia_semana} className="rounded-xl border border-slate-200 p-4">
-                {/* Fila superior: nombre del día + interruptor */}
                 <div className="flex items-center justify-between">
                   <div className="font-medium text-slate-900">{d?.name}</div>
                   <label className="inline-flex items-center gap-2 text-sm">
@@ -226,7 +207,6 @@ export default function Horarios() {
                         const activo = e.target.checked;
                         setRow(idx, {
                           activo,
-                          // si se activa y no hay bloques, agregamos uno por defecto
                           bloques:
                             activo && (!r.bloques || r.bloques.length === 0)
                               ? [{ desde: "09:00", hasta: "13:00" }]
@@ -238,7 +218,6 @@ export default function Horarios() {
                   </label>
                 </div>
 
-                {/* Intervalo */}
                 <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className={LABEL}>Intervalo (min)</label>
@@ -255,7 +234,6 @@ export default function Horarios() {
                   </div>
                 </div>
 
-                {/* Bloques (solo si el día está activo) */}
                 {r.activo && (
                   <div className="mt-3 space-y-2">
                     <div className="text-xs font-semibold text-slate-700">Bloques</div>
@@ -314,11 +292,23 @@ export default function Horarios() {
           })}
         </div>
 
-        {/* Guardar */}
-        <div className="mt-4">
+        {/* Guardar + mensaje al lado */}
+        <div className="mt-4 flex items-center gap-3">
           <button onClick={onSave} disabled={loading} className={BTN}>
             {loading ? "Guardando…" : "Guardar horarios"}
           </button>
+
+          {msg && (
+            <div
+              className={`rounded-xl px-3 py-2 text-sm ${
+                /cerró|error|No se pudo|403|404|405|422|500/i.test(msg)
+                  ? "bg-red-50 text-red-700 ring-1 ring-red-200"
+                  : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+              }`}
+            >
+              {msg}
+            </div>
+          )}
         </div>
       </div>
     </div>

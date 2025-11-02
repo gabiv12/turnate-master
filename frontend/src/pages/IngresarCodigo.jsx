@@ -1,115 +1,66 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import api from "../services/api";
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { useUser } from "../context/UserContext.jsx";
 
-// ✅ Acepta A-Z y 0-9 (sin filtrar I/O/1/0)
-const SAFE_REGEX = /[A-Z0-9]/g;
-const SAFE_PATTERN = "^[A-Z0-9]{4,10}$";
+const BOX = "w-full rounded-xl border border-slate-300 bg-white px-4 py-3 outline-none focus:ring-2 focus:ring-sky-300";
+const BTN = "rounded-xl bg-sky-600 px-5 py-3 text-sm font-semibold text-white shadow hover:bg-sky-700 disabled:opacity-60";
 
 export default function IngresarCodigo() {
-  const [codigo, setCodigo] = useState("");
-  const [mensaje, setMensaje] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [searchParams] = useSearchParams();
-  const navigate = useNavigate();
+  const nav = useNavigate();
+  const { user } = useUser() || {};
+  const [code, setCode] = useState("");
+  const [msg, setMsg] = useState("");
 
   useEffect(() => {
-    const q = (searchParams.get("code") || "").toUpperCase();
-    if (q) setCodigo(q);
-  }, [searchParams]);
+    if (!user) {
+      nav("/login?next=/reservar", { replace: true });
+    }
+  }, [user, nav]);
 
-  const sanitized = useMemo(() => (codigo.match(SAFE_REGEX) || []).join(""), [codigo]);
-  const valido = useMemo(() => new RegExp(SAFE_PATTERN).test(sanitized), [sanitized]);
-
-  const buscar = async () => {
-    setMensaje("");
-    if (!valido) {
-      setMensaje("Ingresá un código válido (4 a 10 caracteres).");
+  const onSubmit = (e) => {
+    e.preventDefault();
+    const c = (code || "").trim().toUpperCase();
+    if (!/^[A-Z0-9]{6,12}$/.test(c)) {
+      setMsg("Ingresá un código válido (6–12 caracteres alfanuméricos).");
+      setTimeout(() => setMsg(""), 2500);
       return;
     }
-    setLoading(true);
-    try {
-      const { data } = await api.get(`/emprendedores/by-codigo/${encodeURIComponent(sanitized)}`);
-      if (data?.id) {
-        navigate(`/reservar/${sanitized}`, { replace: true });
-      } else {
-        setMensaje("El código ingresado no corresponde a ningún emprendedor.");
-      }
-    } catch (err) {
-      console.error("by-codigo error:", err);
-      setMensaje(
-        err?.response?.data?.detail ||
-          "El código ingresado no corresponde a ningún emprendedor."
-      );
-    } finally {
-      setLoading(false);
-    }
+    nav(`/reservar/${c}`);
   };
 
   return (
-    <div className="min-h-screen w-full bg-gradient-to-b from-blue-600 to-cyan-400 flex items-center justify-center p-4">
-      <div className="w-full max-w-5xl">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
-          {/* LADO IZQUIERDO: imagen */}
-          <div className="order-2 md:order-1">
-            <div className="rounded-2xl overflow-hidden ring-1 ring-white/50 shadow-xl">
-              <img
-                src="/images/ReservaCodigo.png"
-                alt="Reservá con tu código"
-                className="w-full h-72 md:h-[420px] object-cover bg-white"
-                onError={(e) => { e.currentTarget.style.display = "none"; }}
-              />
-            </div>
+    <div className="space-y-5">
+      <div className="-mx-4 lg:-mx-6 overflow-x-clip">
+        <div className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-6 text-white shadow">
+          <div className="mx-auto max-w-3xl">
+            <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Reservar por código</h1>
+            <p className="text-sm md:text-base/relaxed opacity-90 mt-1">
+              Ingresá el código que te compartió el emprendimiento para ver su agenda y sacar turno.
+            </p>
           </div>
-
-          {/* LADO DERECHO: tarjeta de búsqueda */}
-          <div className="order-1 md:order-2">
-            <div className="rounded-2xl p-[1px] bg-white/30 shadow-2xl">
-              <div className="rounded-2xl bg-white p-6 md:p-8">
-                <h1 className="text-2xl font-bold text-slate-800">
-                  Ingresá el código del emprendedor
-                </h1>
-                <p className="text-sm text-slate-600 mt-1">
-                  El código es único. Te lleva directo a la agenda pública para reservar.
-                </p>
-
-                <div className="mt-6 space-y-3">
-                  <input
-                    type="text"
-                    pattern={SAFE_PATTERN}
-                    value={codigo}
-                    onChange={(e) => setCodigo((e.target.value || "").toUpperCase())}
-                    placeholder="Ej.: ABC123"
-                    className="w-full border rounded-xl px-4 py-3 text-lg tracking-widest text-center"
-                  />
-                  <button
-                    disabled={loading || !valido}
-                    onClick={buscar}
-                    className="w-full py-3 rounded-xl bg-blue-600 text-white font-semibold disabled:opacity-50"
-                  >
-                    {loading ? "Buscando..." : "Buscar"}
-                  </button>
-
-                  {!!mensaje && (
-                    <div className="text-sm text-red-600 text-center mt-1">
-                      {mensaje}
-                    </div>
-                  )}
-
-                  <div className="mt-2 text-xs text-gray-500 text-center">
-                    Código (normalizado): <b className="text-gray-700">{sanitized || "—"}</b>
-                  </div>
-
-                  <p className="mt-4 text-xs text-center text-gray-500">
-                    ¿No tenés un código? Pedíselo al emprendedor.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-          {/* /tarjeta */}
         </div>
       </div>
+
+      <form onSubmit={onSubmit} className="mx-auto max-w-3xl rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        {msg && <div className="mb-3 rounded-lg bg-rose-50 text-rose-700 text-sm px-3 py-2 ring-1 ring-rose-200">{msg}</div>}
+        <label className="block text-xs font-semibold text-sky-700 mb-1">Código del emprendimiento</label>
+        <div className="flex gap-2">
+          <input
+            className={BOX}
+            placeholder="Ej: 8GPWJXVG"
+            value={code}
+            onChange={(e)=>setCode(e.target.value)}
+            autoFocus
+          />
+          <button type="submit" className={BTN}>Buscar</button>
+        </div>
+
+        <ul className="mt-3 text-xs text-slate-500 space-y-1.5">
+          <li>• Encontrás el código en el link que te enviaron (termina en <code className="font-mono">/reservar/CODIGO</code>).</li>
+          <li>• Si no lo tenés, pedíselo al emprendimiento.</li>
+          <li>• El código puede cambiar si el dueño lo regenera.</li>
+        </ul>
+      </form>
     </div>
   );
 }

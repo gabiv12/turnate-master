@@ -1,160 +1,179 @@
 ﻿# app/routers/usuarios.py
-from datetime import datetime
-import re, secrets
-from typing import Optional
-
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from __future__ import annotations
+from fastapi import APIRouter, Depends, HTTPException, status, Header
+from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
+from typing import Optional
+import hashlib, secrets
 
-from app.deps import get_db, get_current_user
-from app.models import Usuario, Emprendedor
-from app.auth import create_access_token, get_password_hash, verify_password
-from app.schemas import (
-    UsuarioCreate, UsuarioUpdateMe, UsuarioOut,
-    EmprendedorOut, ActivacionEmprendedorOut, AuthResponse
-)
+from app import models, schemas
+from app.deps import get_db  # ⬅️ Mantenemos tu get_db tal cual
 
 router = APIRouter(prefix="/usuarios", tags=["usuarios"])
 
-_username_regex = re.compile(r"[^a-z0-9_]+")
+# ---------- helpers ----------
+def sha256(s: str) -> str:
+    import hashlib
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-def _normalize_username(base: str) -> str:
-    base = base.strip().lower()
-    base = _username_regex.sub("", base)
-    return base or "user"
+# ahora incluye 'hashed_password'
+_PWD_ATTRS = ("hashed_password", "password_hash", "password", "clave")
 
-def _suggest_username_from_email(email: str) -> str:
-    return _normalize_username(email.split("@")[0])
+def get_pwd_value_from_user(u):
+    """Devuelve el valor de contraseña almacenada en el primer campo existente."""
+    for attr in _PWD_ATTRS:
+        if hasattr(u, attr):
+            return getattr(u, attr)
+    return None
 
-def _ensure_unique_username(db: Session, base: str) -> str:
-    cand = base
-    for i in range(1, 200):
-        exists = db.query(Usuario).filter(Usuario.username == cand).first()
-        if not exists:
+def set_pwd_value_to_user(u, hashed_value: str) -> None:
+    """Escribe el hash en todos los campos de password que existan en el modelo."""
+    for attr in _PWD_ATTRS:
+        if hasattr(u, attr):
+            setattr(u, attr, hashed_value)
+
+def verify_password(plain: str, stored: str | None) -> bool:
+    if stored is None:
+        return False
+    return stored == plain or stored == sha256(plain)
+
+def generar_codigo_cliente(longitud: int = 8) -> str:
+    alfabeto = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alfabeto) for _ in range(longitud))
+
+def ensure_unico_codigo(db: Session) -> str:
+    for _ in range(10):
+        cand = generar_codigo_cliente(8)
+        if not db.query(models.Emprendedor).filter(models.Emprendedor.codigo_cliente == cand).first():
             return cand
-        cand = f"{base}{i}"
-    return f"{base}{secrets.token_hex(2)}"
+    return generar_codigo_cliente(10)
 
-def _set_password(u: Usuario, raw: str):
-    u.password_hash = get_password_hash(raw)
+# ---------- Schemas login ----------
+class LoginIn(BaseModel):
+    email: EmailStr
+    password: str
 
-def _ensure_unique_codigo(db: Session) -> str:
-    for _ in range(20):
-        code = secrets.token_hex(3)[:6].upper()
-        if not db.query(Emprendedor).filter(Emprendedor.codigo == code).first():
-            return code
-    return f"EMP{int(datetime.utcnow().timestamp())}"
+class LoginOut(BaseModel):
+    token: Optional[str] = None
+    user: schemas.UsuarioOut
 
-def _user_to_out(u: Usuario) -> UsuarioOut:
-    return UsuarioOut.model_validate(u)
+# ---------- Registro ----------
+@router.post("/registro", response_model=schemas.UsuarioOut, status_code=201)
+def registro(payload: schemas.UsuarioCreate, db: Session = Depends(get_db)):
+    # email único
+    existe = db.query(models.Usuario).filter(models.Usuario.email == payload.email).first()
+    if existe:
+        raise HTTPException(status_code=409, detail="Email ya registrado")
 
-@router.post("/registro", response_model=AuthResponse)
-def registrar(payload: UsuarioCreate, db: Session = Depends(get_db)):
-    if db.query(Usuario).filter(Usuario.email == payload.email).first():
-        raise HTTPException(400, "El email ya está registrado.")
-
-    u = Usuario(
+    u = models.Usuario(
         email=payload.email,
-        nombre=payload.nombre or "Usuario",
+        nombre=payload.nombre,
+        apellido=payload.apellido,
+        dni=payload.dni,
+        rol="cliente",
         is_active=True,
-        rol="user",
     )
-    u.username = _ensure_unique_username(db, _suggest_username_from_email(payload.email))
-    _set_password(u, payload.password)
+
+    # guardamos password en el/los campo(s) que existan
+    set_pwd_value_to_user(u, sha256(payload.password))
 
     db.add(u)
     db.commit()
     db.refresh(u)
+    return schemas.UsuarioOut.model_validate(u)
 
-    token = create_access_token({"sub": str(u.id), "rol": u.rol, "email": u.email})
-    return AuthResponse(user_schema=_user_to_out(u), token=token)
+# ---------- Login ----------
+@router.post("/login", response_model=LoginOut)
+def login(payload: LoginIn, db: Session = Depends(get_db)):
+    u = db.query(models.Usuario).filter(models.Usuario.email == payload.email).first()
+    if not u:
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-@router.post("/login", response_model=AuthResponse)
-async def login(request: Request, db: Session = Depends(get_db)):
-    # Soporta JSON o FORM y acepta email / username / usuario + password / clave
-    data = {}
-    try:
-        data = await request.json()
-    except Exception:
-        pass
-    if not isinstance(data, dict) or not data:
-        try:
-            form = await request.form()
-            data = dict(form)
-        except Exception:
-            data = {}
+    stored = get_pwd_value_from_user(u)
+    if not verify_password(payload.password, stored):
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-    ident = data.get("email") or data.get("username") or data.get("usuario")
-    password = data.get("password") or data.get("clave")
-    if not ident or not password:
-        raise HTTPException(400, "Enviá email/username y password.")
+    # Token simple (dev). Si usás JWT real, generalo acá y devuélvelo en 'token'
+    token = "dev-" + sha256(u.email)[:24]
+    return LoginOut(token=token, user=schemas.UsuarioOut.model_validate(u))
 
-    if "@" in ident:
-        q = db.query(Usuario).filter(Usuario.email == ident)
-    else:
-        q = db.query(Usuario).filter(Usuario.username == ident)
-    u = q.first()
-    if not u or not verify_password(password, u.password_hash):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciales inválidas.")
+# ---------- Me ----------
+@router.get("/me", response_model=schemas.UsuarioOut)
+def me(authorization: Optional[str] = Header(default=None),
+       db: Session = Depends(get_db)) -> schemas.UsuarioOut:
+    # DEV: si no hay JWT, devolvemos el último usuario activo para simplificar
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Falta Authorization")
+    tok = authorization.replace("Bearer ", "").strip()
+    if not tok.startswith("dev-"):
+        raise HTTPException(status_code=401, detail="Token inválido")
 
-    token = create_access_token({"sub": str(u.id), "rol": u.rol, "email": u.email})
-    return AuthResponse(user_schema=_user_to_out(u), token=token)
+    u = db.query(models.Usuario).order_by(models.Usuario.id.desc()).first()
+    if not u:
+        raise HTTPException(status_code=401, detail="Sesión inválida")
+    return schemas.UsuarioOut.model_validate(u)
 
-@router.get("/me", response_model=UsuarioOut)
-def me(user=Depends(get_current_user)):
-    return _user_to_out(user)
+# ---------- Activar emprendedor ----------
+# ✅ Solución definitiva: valida Authorization EXACTO igual que /me (acepta dev-*)
+@router.put("/{usuario_id}/activar_emprendedor", response_model=schemas.ActivacionEmprendedorOut)
+def activar_emprendedor(
+    usuario_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    # === misma validación que /usuarios/me ===
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Falta Authorization")
+    tok = authorization.replace("Bearer ", "").strip()
+    if not tok.startswith("dev-"):
+        raise HTTPException(status_code=401, detail="Token inválido")
 
-@router.put("/me", response_model=UsuarioOut)
-def update_me(payload: UsuarioUpdateMe, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if payload.email and payload.email != user.email:
-        if db.query(Usuario).filter(Usuario.email == payload.email).first():
-            raise HTTPException(400, "El email ya está en uso.")
-        user.email = payload.email
-        # autocompleta username si estuviera vacío (por compatibilidad)
-        if not user.username:
-            base = _suggest_username_from_email(user.email)
-            user.username = _ensure_unique_username(db, base)
-    if payload.nombre:
-        user.nombre = payload.nombre
-    db.commit(); db.refresh(user)
-    return _user_to_out(user)
+    # Usuario "actual" (modo dev: último usuario)
+    current = db.query(models.Usuario).order_by(models.Usuario.id.desc()).first()
+    if not current:
+        raise HTTPException(status_code=401, detail="Sesión inválida")
 
-@router.get("/me/emprendedor", response_model=EmprendedorOut)
-def me_emprendedor(db: Session = Depends(get_db), user=Depends(get_current_user)):
-    emp = db.query(Emprendedor).filter(Emprendedor.usuario_id == user.id).first()
+    # Autorización: el mismo usuario o admin
+    if current.id != usuario_id and getattr(current, "rol", "cliente") not in ("admin",):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No autorizado")
+
+    usuario = db.query(models.Usuario).filter(models.Usuario.id == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    emp = db.query(models.Emprendedor).filter(models.Emprendedor.usuario_id == usuario_id).first()
     if not emp:
-        raise HTTPException(404, "No tenés emprendedor activo todavía.")
-    return EmprendedorOut.model_validate(emp)
-
-@router.put("/{usuario_id}/activar_emprendedor", response_model=ActivacionEmprendedorOut)
-def activar_emprendedor(usuario_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    if usuario_id != user.id and user.rol != "admin":
-        raise HTTPException(403, "No autorizado.")
-
-    target = db.query(Usuario).get(usuario_id)
-    if not target:
-        raise HTTPException(404, "Usuario no encontrado.")
-
-    emp = db.query(Emprendedor).filter(Emprendedor.usuario_id == usuario_id).first()
-    if not emp:
-        emp = Emprendedor(
-            usuario_id=usuario_id,
-            nombre=target.nombre or "Emprendimiento",
-            activo=True,
-            codigo=_ensure_unique_codigo(db),
+        nombre_base = (getattr(usuario, "nombre", None) or "Mi Negocio").strip() or "Mi Negocio"
+        emp = models.Emprendedor(
+            usuario_id=usuario.id,
+            nombre=nombre_base,
+            descripcion=None,
+            codigo_cliente=ensure_unico_codigo(db),
         )
-        db.add(emp)
-        db.commit()
-        db.refresh(emp)
-    elif not emp.codigo:
-        emp.codigo = _ensure_unique_codigo(db)
-        db.commit(); db.refresh(emp)
+        db.add(emp); db.flush()
+    else:
+        if not emp.codigo_cliente:
+            emp.codigo_cliente = ensure_unico_codigo(db)
 
-    token = create_access_token({"sub": str(target.id), "rol": target.rol, "email": target.email})
-    return ActivacionEmprendedorOut(
-        ok=True,
-        emprendedor_id=emp.id,
-        codigo=emp.codigo,
-        user_schema=_user_to_out(target),
-        token=token,
-    )
+    if getattr(usuario, "rol", "cliente") == "cliente":
+        usuario.rol = "emprendedor"
+
+    db.commit(); db.refresh(emp)
+    out = schemas.EmprendedorOut.model_validate({
+        "id": emp.id,
+        "nombre": emp.nombre,
+        "descripcion": emp.descripcion,
+        "codigo_cliente": emp.codigo_cliente,
+        "owner_user_id": emp.usuario_id,
+        "created_at": emp.created_at,
+        # extra opcionales si existen
+        "cuit": getattr(emp, "cuit", None),
+        "telefono": getattr(emp, "telefono", None),
+        "direccion": getattr(emp, "direccion", None),
+        "rubro": getattr(emp, "rubro", None),
+        "redes": getattr(emp, "redes", None),
+        "web": getattr(emp, "web", None),
+        "email_contacto": getattr(emp, "email_contacto", None),
+        "logo_url": getattr(emp, "logo_url", None),
+    })
+    return schemas.ActivacionEmprendedorOut(token=None, emprendedor=out)

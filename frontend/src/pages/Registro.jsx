@@ -2,7 +2,7 @@
 import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import api from "../services/api.js";
+import { register } from "../services/usuarios.js";   // usamos el servicio de registro
 import Button from "../components/Button";
 import Input from "../components/Input";
 import Loader from "../components/Loader";
@@ -12,10 +12,11 @@ const sideImg = "/images/mujer-que-trabaja-oficina-casa.jpg";
 export default function Registro() {
   const navigate = useNavigate();
 
-  // Campos mínimos: email, username, password
+  // Campos del formulario
   const [form, setForm] = useState({
+    nombre: "",
+    apellido: "",
     email: "",
-    username: "",
     password: "",
   });
 
@@ -34,22 +35,32 @@ export default function Registro() {
     setIsLoading(true);
     setMsg("");
 
-    try {
-      // El back deriva "nombre" internamente y usa mensajes genéricos
-      await api.post("/usuarios/registro", {
-        email: form.email.trim(),
-        username: form.username.trim(),
-        password: form.password,
-      });
+    const payload = {
+      email: String(form.email || "").trim(),
+      password: String(form.password || ""),
+      nombre: form.nombre?.trim() || undefined,
+      apellido: form.apellido?.trim() || undefined,
+    };
 
-      navigate("/login?registered=1", { replace: true });
+    try {
+      await register(payload); // 201 si ok
+      setMsg("");
+      navigate("/login?nuevo=1", { replace: true }); // redirige al login
     } catch (err) {
-      // Mensajes genéricos para no filtrar info
-      const status = err?.response?.status;
+      const status = err?._info?.status ?? err?.response?.status;
+      const data   = err?._info?.data   ?? err?.response?.data;
+
+      console.warn("[REGISTRO] error status:", status, "data:", data);
+
       let m = "No se pudo crear la cuenta.";
-      if (status === 404) m = "Servicio no disponible. Intentalo más tarde.";
+      if (status === 409) m = "El email ya está registrado.";
+      if (status === 400 || status === 422) {
+        m = typeof data?.detail === "string" ? data.detail : "Datos inválidos.";
+      }
+      if (status === undefined) {
+        m = "No hay conexión con el servidor. Verificá VITE_API_URL y que el backend esté corriendo.";
+      }
       setMsg(`⚠️ ${m}`);
-      console.error(err);
     } finally {
       setIsLoading(false);
     }
@@ -106,6 +117,37 @@ export default function Registro() {
                   )}
 
                   <form onSubmit={onSubmit} className="grid gap-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label htmlFor="nombre" className="block text-sm font-medium text-slate-700 mb-1">
+                          Nombre
+                        </label>
+                        <Input
+                          id="nombre"
+                          name="nombre"
+                          type="text"
+                          value={form.nombre}
+                          onChange={onChange}
+                          placeholder="Nombre"
+                          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-300"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="apellido" className="block text-sm font-medium text-slate-700 mb-1">
+                          Apellido
+                        </label>
+                        <Input
+                          id="apellido"
+                          name="apellido"
+                          type="text"
+                          value={form.apellido}
+                          onChange={onChange}
+                          placeholder="Apellido"
+                          className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-300"
+                        />
+                      </div>
+                    </div>
+
                     <div>
                       <label htmlFor="email" className="block text-sm font-medium text-slate-700 mb-1">
                         Correo electrónico
@@ -117,22 +159,6 @@ export default function Registro() {
                         value={form.email}
                         onChange={onChange}
                         placeholder="tu@email.com"
-                        required
-                        className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-300"
-                      />
-                    </div>
-
-                    <div>
-                      <label htmlFor="username" className="block text-sm font-medium text-slate-700 mb-1">
-                        Usuario
-                      </label>
-                      <Input
-                        id="username"
-                        name="username"
-                        type="text"
-                        value={form.username}
-                        onChange={onChange}
-                        placeholder="ej: usuario123"
                         required
                         className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 outline-none focus:ring-2 focus:ring-blue-300"
                       />

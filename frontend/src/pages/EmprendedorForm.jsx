@@ -1,33 +1,60 @@
 // src/pages/EmprendedorForm.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import api from "../services/api";
+import { miEmprendedor, actualizarEmprendedor } from "../services/emprendedores.js";
 import { useUser } from "../context/UserContext.jsx";
 import Input from "../components/Input";
 import Button from "../components/Button";
 import ModalActivacionEmprendedor from "../components/ModalActivacionEmprendedor.jsx";
 
 const LABEL = "block text-sm font-semibold text-slate-700 mb-1";
-const BOX = "w-full rounded-xl border border-slate-200 bg-white/80 px-3 py-2 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
+const BOX =
+  "w-full rounded-xl border border-slate-200 bg-white/80 px-3 py-2 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500";
 
-const LOGO_SRC_FALLBACK = ""; // si querés mostrar algo por defecto
+const LOGO_SRC_FALLBACK = "";
+
+/* ================== Badges simples ================== */
+function RoleBadge({ rol }) {
+  const map = {
+    admin: { label: "Admin", cls: "bg-amber-50 text-amber-700 ring-amber-200" },
+    emprendedor: { label: "Emprendedor", cls: "bg-emerald-50 text-emerald-700 ring-emerald-200" },
+    cliente: { label: "Cliente", cls: "bg-slate-100 text-slate-700 ring-slate-300" },
+    user: { label: "Usuario", cls: "bg-slate-100 text-slate-700 ring-slate-300" },
+  };
+  const m = map[rol] || map.cliente;
+  return (
+    <span className={`inline-flex items-center rounded-lg px-2 py-1 text-xs font-medium ring-1 ${m.cls}`}>
+      {m.label}
+    </span>
+  );
+}
+
+function StatusBadge({ hasEmp }) {
+  return hasEmp ? (
+    <span className="inline-flex items-center rounded-lg px-2 py-1 text-xs font-medium ring-1 bg-sky-50 text-sky-700 ring-sky-200">
+      Emprendimiento activo
+    </span>
+  ) : (
+    <span className="inline-flex items-center rounded-lg px-2 py-1 text-xs font-medium ring-1 bg-rose-50 text-rose-700 ring-rose-200">
+      Sin emprendimiento
+    </span>
+  );
+}
+/* ==================================================== */
 
 export default function EmprendedorForm() {
-  const { user, refreshUser, isEmprendedor } = useUser();
+  const { user, refreshUser } = useUser();
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
 
-  const [emp, setEmp] = useState(null);      // datos “oficiales” del backend
-  const [extras, setExtras] = useState(null); // datos locales (cuit/telefono/etc.)
+  const [emp, setEmp] = useState(null);      // datos del backend
+  const [extras, setExtras] = useState(null); // locales
   const [showActivate, setShowActivate] = useState(false);
 
-  // Logo (local, sin backend)
   const [logoPreview, setLogoPreview] = useState(LOGO_SRC_FALLBACK);
-  const [logoFile, setLogoFile] = useState(null);
   const fileRef = useRef(null);
 
-  // URL pública (si hay código)
   const publicUrl = useMemo(() => {
     const code = emp?.codigo_cliente || "";
     if (!code) return "";
@@ -35,7 +62,6 @@ export default function EmprendedorForm() {
     return `${origin}/reservar/${code}`;
   }, [emp]);
 
-  // Clave para extras
   const extrasKey = useMemo(() => (emp?.id ? `emp_extras_${emp.id}` : null), [emp?.id]);
 
   useEffect(() => {
@@ -44,19 +70,19 @@ export default function EmprendedorForm() {
     return () => clearTimeout(t);
   }, [msg]);
 
+  // Carga inicial
   useEffect(() => {
     (async () => {
       setLoading(true);
       try {
-        // Asegurá sesión actualizada
         await refreshUser?.();
-        // Trae “mi emprendedor”
-        const r = await api.get("/usuarios/me/emprendedor");
-        const data = r?.data || null;
-        setEmp(data);
-
-        // Cargar extras locales si existieran
-        if (data?.id) {
+        const data = await miEmprendedor().catch(() => null); // 404 => no emprendedor
+        if (!data || !data.id) {
+          setEmp(null);
+          setExtras(null);
+          setShowActivate(true);
+        } else {
+          setEmp(data);
           try {
             const raw = localStorage.getItem(`emp_extras_${data.id}`);
             if (raw) {
@@ -65,32 +91,17 @@ export default function EmprendedorForm() {
               if (parsed.logoDataURL) setLogoPreview(parsed.logoDataURL);
             } else {
               setExtras({
-                cuit: "",
-                telefono: "",
-                direccion: "",
-                rubro: "",
-                redes: "",
-                web: "",
-                email_contacto: "",
+                cuit: "", telefono: "", direccion: "", rubro: "",
+                redes: "", web: "", email_contacto: "",
               });
             }
           } catch {
             setExtras({
-              cuit: "",
-              telefono: "",
-              direccion: "",
-              rubro: "",
-              redes: "",
-              web: "",
-              email_contacto: "",
+              cuit: "", telefono: "", direccion: "", rubro: "",
+              redes: "", web: "", email_contacto: "",
             });
           }
         }
-      } catch (e) {
-        // 404 => no es emprendedor todavía
-        setEmp(null);
-        setExtras(null);
-        setShowActivate(true);
       } finally {
         setLoading(false);
       }
@@ -120,7 +131,6 @@ export default function EmprendedorForm() {
   const onLogoChange = (e) => {
     const f = e.target.files?.[0];
     if (!f) return;
-    setLogoFile(f);
     const reader = new FileReader();
     reader.onload = () => setLogoPreview(reader.result);
     reader.readAsDataURL(f);
@@ -134,27 +144,26 @@ export default function EmprendedorForm() {
         payload.logoDataURL = logoPreview;
       }
       localStorage.setItem(extrasKey, JSON.stringify(payload));
-    } catch {}
+      setMsg("Logo guardado localmente.");
+    } catch {
+      setMsg("No se pudo guardar el logo.");
+    }
   };
 
   const onSubmit = async (e) => {
     e.preventDefault();
     if (!emp?.id) return;
 
-    setSaving(true); setMsg("");
+    setSaving(true);
+    setMsg("");
     try {
-      // El back actual guarda seguro estos dos (y el código ya existe)
       const payload = {
         nombre: emp?.nombre || emp?.negocio || "",
         descripcion: emp?.descripcion || "",
-        // No intentamos cambiar codigo_cliente si el back no lo permite
       };
-
-      await api.put(`/emprendedores/${emp.id}`, payload);
-
-      // Persistimos extras localmente
+      const updated = await actualizarEmprendedor(emp.id, payload);
+      setEmp(updated);
       persistExtrasLocal();
-
       setMsg("Datos guardados.");
     } catch {
       setMsg("No se pudo guardar. Intentá nuevamente.");
@@ -165,26 +174,20 @@ export default function EmprendedorForm() {
 
   const afterActivate = async () => {
     setShowActivate(false);
-    // refresca user + emprendedor
     try {
       await refreshUser?.();
-      const r = await api.get("/usuarios/me/emprendedor");
-      setEmp(r?.data || null);
-      if (r?.data?.id) {
-        const raw = localStorage.getItem(`emp_extras_${r.data.id}`);
+      const data = await miEmprendedor().catch(() => null);
+      setEmp(data || null);
+      if (data?.id) {
+        const raw = localStorage.getItem(`emp_extras_${data.id}`);
         if (raw) {
           const parsed = JSON.parse(raw);
           setExtras(parsed);
           if (parsed.logoDataURL) setLogoPreview(parsed.logoDataURL);
         } else {
           setExtras({
-            cuit: "",
-            telefono: "",
-            direccion: "",
-            rubro: "",
-            redes: "",
-            web: "",
-            email_contacto: "",
+            cuit: "", telefono: "", direccion: "", rubro: "",
+            redes: "", web: "", email_contacto: "",
           });
         }
       }
@@ -205,8 +208,17 @@ export default function EmprendedorForm() {
   return (
     <div className="rounded-2xl bg-white/95 shadow-lg ring-1 ring-slate-200 p-6">
       <div className="mb-6">
-        <h1 className="text-xl font-bold text-slate-800">Emprendimiento</h1>
-        <p className="text-sm text-slate-600">Completá los datos de tu negocio.</p>
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h1 className="text-xl font-bold text-slate-800">Emprendimiento</h1>
+            <p className="text-sm text-slate-600">Completá los datos de tu negocio.</p>
+          </div>
+          {/* === NUEVO: badges de rol y estado === */}
+          <div className="flex items-center gap-2">
+            <RoleBadge rol={user?.rol} />
+            <StatusBadge hasEmp={!!emp?.id} />
+          </div>
+        </div>
       </div>
 
       {msg && (
@@ -239,7 +251,9 @@ export default function EmprendedorForm() {
                 {logoPreview ? (
                   <img src={logoPreview} alt="logo" className="h-full w-full object-cover" />
                 ) : (
-                  <div className="grid h-full w-full place-items-center text-gray-400 text-xs">Sin logo</div>
+                  <div className="grid h-full w-full place-items-center text-gray-400 text-xs">
+                    Sin logo
+                  </div>
                 )}
               </div>
               <div className="flex items-center gap-2">
@@ -294,7 +308,7 @@ export default function EmprendedorForm() {
                 />
               </div>
 
-              {/* Código público (solo lectura + copiar) */}
+              {/* Código público */}
               <div className="grid gap-2">
                 <label className={LABEL}>Código público</label>
                 <div className="flex gap-2">
@@ -345,15 +359,33 @@ export default function EmprendedorForm() {
                 </div>
                 <div>
                   <label className={LABEL}>Redes</label>
-                  <Input name="redes" value={extras?.redes || ""} onChange={onChangeExtras} className={BOX} placeholder="@mi_negocio / fb.com/mi_negocio" />
+                  <Input
+                    name="redes"
+                    value={extras?.redes || ""}
+                    onChange={onChangeExtras}
+                    className={BOX}
+                    placeholder="@mi_negocio / fb.com/mi_negocio"
+                  />
                 </div>
                 <div>
                   <label className={LABEL}>Web</label>
-                  <Input name="web" value={extras?.web || ""} onChange={onChangeExtras} className={BOX} placeholder="https://…" />
+                  <Input
+                    name="web"
+                    value={extras?.web || ""}
+                    onChange={onChangeExtras}
+                    className={BOX}
+                    placeholder="https://…"
+                  />
                 </div>
                 <div>
                   <label className={LABEL}>Email de contacto</label>
-                  <Input type="email" name="email_contacto" value={extras?.email_contacto || ""} onChange={onChangeExtras} className={BOX} />
+                  <Input
+                    type="email"
+                    name="email_contacto"
+                    value={extras?.email_contacto || ""}
+                    onChange={onChangeExtras}
+                    className={BOX}
+                  />
                 </div>
               </div>
             </div>

@@ -40,7 +40,7 @@ export default function App() {
         <Route path="*" element={<NotFound />} />
       </Route>
 
-      {/* Panel (un solo PanelShell) */}
+      {/* Panel (protegido) */}
       <Route element={<PanelShell />}>
         <Route element={<ProtectedRoute />}>
           <Route path="/reservar" element={<IngresarCodigo />} />
@@ -49,7 +49,6 @@ export default function App() {
           <Route path="/update-user" element={<Navigate to="/perfil" replace />} />
           <Route path="/estadisticas" element={<Estadisticas />} />
           <Route path="/suscripcion" element={<Suscripcion />} />
-          {/* NO requiere rol para poder activar */}
           <Route path="/emprendimiento" element={<EmprendedorForm />} />
           <Route path="/turnos" element={<Turnos />} />
         </Route>
@@ -66,6 +65,7 @@ export default function App() {
         <Route path="*" element={<NotFound />} />
       </Route>
 
+      {/* fallback final */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
