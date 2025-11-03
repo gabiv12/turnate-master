@@ -1,7 +1,7 @@
 // src/services/usuarios.js
-import api, { setAuthToken, setUser } from "./api";
+import api, { setAuthToken, setUser as setUserLS } from "./api";
 
-/* ---------- Registro (usado por Registro.jsx) ---------- */
+/* ----------- Registro / Login / Me ----------- */
 export async function register({ email, password, nombre, apellido, dni }) {
   const payload = {
     email: String(email || "").trim(),
@@ -11,83 +11,93 @@ export async function register({ email, password, nombre, apellido, dni }) {
     dni: (dni || "").trim() || undefined,
   };
   const { data } = await api.post("/usuarios/registro", payload);
+  if (data?.token) setAuthToken(data.token);
+  if (data?.user)  setUserLS(data.user);
   return data;
 }
 
-/* ---------- Login ---------- */
 export async function login({ email, password }) {
   const { data } = await api.post("/usuarios/login", { email, password });
   if (data?.token) setAuthToken(data.token);
-  if (data?.user) setUser(data.user);
+  if (data?.user)  setUserLS(data.user);
   return data;
 }
 
-/* ---------- /usuarios/me (GET) ---------- */
 export async function me() {
   const { data } = await api.get("/usuarios/me");
-  if (data) setUser(data);
+  if (data) setUserLS(data);
   return data;
 }
 
-/* ---------- Actualización de perfil "inteligente" ----------
-   Evita el 405 usando varios endpoints posibles del backend.
-   Orden de intento:
-   1) PUT /usuarios/me
-   2) PATCH /usuarios/me
-   3) PUT /usuarios/{id}
-   4) PATCH /usuarios/{id}
-*/
-export async function updatePerfilSmart(payload, userId) {
-  let uid = userId;
-  if (!uid) {
-    try {
-      const m = await me();
-      uid = m?.id;
-    } catch {}
+/* ----------- Update perfil (prioriza /usuarios/{id}) ----------- */
+export async function updatePerfilSmart(payload = {}, userId) {
+  // sanitizar
+  const clean = {};
+  for (const [k, v] of Object.entries(payload || {})) {
+    if (v !== undefined) clean[k] = typeof v === "string" ? v.trim() : v;
   }
 
-  const intents = [
-    () => api.put("/usuarios/me", payload),
-    () => api.patch("/usuarios/me", payload),
-    () => (uid ? api.put(`/usuarios/${uid}`, payload) : Promise.reject({ skip: true })),
-    () => (uid ? api.patch(`/usuarios/${uid}`, payload) : Promise.reject({ skip: true })),
+  // obtener id
+  let uid = userId;
+  if (!uid) {
+    try { uid = (await me())?.id; } catch {}
+  }
+  if (!uid) throw new Error("No se pudo determinar el ID de usuario.");
+
+  const attempts = [
+    { method: "put",   url: `/usuarios/${uid}` },
+    { method: "patch", url: `/usuarios/${uid}` },
+    { method: "patch", url: "/usuarios/me" },
+    { method: "put",   url: "/usuarios/me" },
   ];
 
-  let lastErr;
-  for (const run of intents) {
+  let lastErr = null;
+  for (const a of attempts) {
     try {
-      const r = await run();
-      // si el back devuelve user actualizado o token, los reflejamos
-      if (r?.data?.token) setAuthToken(r.data.token);
-      if (r?.data) setUser(r.data);
-      return r; // { data: ... }
+      const { data } = await api.request({ method: a.method, url: a.url, data: clean });
+
+      // token nuevo?
+      const newToken = data?.token || data?.access_token || data?.jwt || null;
+      if (newToken) setAuthToken(newToken);
+
+      // merge y persistir
+      const merged = await _mergeUserLocal(data, clean);
+      return { data: merged };
     } catch (e) {
-      if (e?.skip) { lastErr = e; continue; }
-      const st = e?.response?.status;
-      // 401/403 devolvemos; el resto probamos otro intento
-      if (st === 401 || st === 403) throw e;
       lastErr = e;
+      const st = e?.response?.status;
+      if (st === 401 || st === 403) throw e;             // auth → cortar
+      if (![400,404,405,409,422].includes(st)) throw e;  // errores "no esperables" → cortar
+      // si es 400/404/405/409/422, probamos el siguiente intento
     }
   }
   throw lastErr || new Error("No se pudo actualizar el perfil.");
 }
 
-/* ---------- Activación de Emprendedor ----------
-   Tu backend define: PUT /usuarios/{usuario_id}/activar_emprendedor
-   Probamos PUT/POST/PATCH por compatibilidad entre entornos.
-*/
+/* ----------- Password ----------- */
+export async function changePassword({ current_password, new_password }) {
+  const { data } = await api.put("/usuarios/me/password", {
+    current_password,
+    new_password,
+  });
+  return data;
+}
+
+/* ----------- Activar Emprendedor ----------- */
 export async function activarEmprendedor(userId) {
-  const respMe = !userId ? await me().catch(() => null) : null;
-  const uid = userId || respMe?.id;
+  let uid = userId;
+  if (!uid) {
+    try { uid = (await me())?.id; } catch {}
+  }
   if (!uid) throw new Error("Falta userId");
 
   const methods = ["put", "post", "patch"];
   const url = `/usuarios/${uid}/activar_emprendedor`;
-
   let lastErr = null;
-  for (const method of methods) {
+
+  for (const m of methods) {
     try {
-      const { data } = await api.request({ method, url, data: {} });
+      const { data } = await api.request({ method: m, url, data: {} });
       if (data?.token) setAuthToken(data.token);
       try { await me(); } catch {}
       return data;
@@ -99,4 +109,26 @@ export async function activarEmprendedor(userId) {
     }
   }
   throw lastErr || new Error("No se pudo activar el modo Emprendedor.");
+}
+
+/* ----------- Utils ----------- */
+async function _mergeUserLocal(serverData, payload) {
+  let localUser = null;
+  try {
+    const raw = localStorage.getItem("user");
+    localUser = raw ? JSON.parse(raw) : null;
+  } catch {}
+
+  const serverUser = serverData?.user ?? serverData ?? {};
+  const merged = {
+    ...(localUser || {}),
+    ...serverUser,
+    email:    serverUser.email    ?? payload.email    ?? localUser?.email,
+    nombre:   serverUser.nombre   ?? payload.nombre   ?? localUser?.nombre,
+    apellido: serverUser.apellido ?? payload.apellido ?? localUser?.apellido,
+    dni:      serverUser.dni      ?? payload.dni      ?? localUser?.dni,
+  };
+
+  setUserLS(merged);
+  return merged;
 }

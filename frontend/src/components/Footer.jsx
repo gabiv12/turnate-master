@@ -37,7 +37,7 @@ export default function Footer() {
             <ul className="mt-2 space-y-1.5 text-sm">
               <li><Link to="/" className="hover:text-white">Inicio</Link></li>
               <li><Link to="/nosotros" className="hover:text-white">Nosotros</Link></li>
-              <li><Link to="/reservar" className="hover:text-white">Reservar</Link></li>
+              
               {token && (
                 <>
                   <li><Link to="/perfil" className="hover:text-white">Panel</Link></li>
@@ -80,7 +80,7 @@ export default function Footer() {
                 >
                   WhatsApp: +54 3644 609497
                 </a>
-                <span className="ml-1 text-slate-500">Santiago B.</span>
+                <span className="ml-1 text-slate-500">Turnate</span>
               </li>
             </ul>
           </div>

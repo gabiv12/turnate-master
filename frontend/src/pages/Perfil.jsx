@@ -1,11 +1,10 @@
 // src/pages/Perfil.jsx
 import React, { useEffect, useRef, useState } from "react";
-import api from "../services/api";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import { useUser } from "../context/UserContext.jsx";
-import { getAuthToken, setUser as lsSetUser } from "../services/api";
-import { updatePerfilSmart } from "../services/usuarios"; // ⬅️ usamos el helper
+import api, { getAuthToken, setUser as lsSetUser } from "../services/api";
+import { me as meSvc, updatePerfilSmart } from "../services/usuarios";
 
 const LABEL = "block text-sm font-semibold text-slate-700 mb-1";
 const BOX =
@@ -27,18 +26,15 @@ const friendlyError = (err) => {
 };
 
 export default function Perfil() {
-  // Context (tolerante si no existe)
+  // Context (si no existe, que no rompa)
   let ctx = { user: null, setSession: null };
-  try {
-    ctx = useUser() || ctx;
-  } catch {}
+  try { ctx = useUser() || ctx; } catch {}
   const { user, setSession } = ctx;
 
   const fileRef = useRef(null);
   const [msg, setMsg] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // ------ Perfil
   const [form, setForm] = useState({
     email: "",
     nombre: "",
@@ -46,14 +42,14 @@ export default function Perfil() {
     dni: "",
   });
 
-  // ------ Avatar (degradable)
+  // Avatar (degradable)
   const [avatarFile, setAvatarFile] = useState(null);
   const [avatarPreview, setAvatarPreview] = useState("");
   const [avatarMsg, setAvatarMsg] = useState("");
   const [avatarSupported, setAvatarSupported] = useState(true);
   const [avatarSaving, setAvatarSaving] = useState(false);
 
-  // ------ Seguridad
+  // Seguridad
   const [secMsg, setSecMsg] = useState("");
   const [secSaving, setSecSaving] = useState(false);
   const [secForm, setSecForm] = useState({ actual: "", nueva: "", confirmar: "" });
@@ -64,12 +60,12 @@ export default function Perfil() {
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await api.get("/usuarios/me");
+        const data = await meSvc();
         setForm({
-          email: data?.email ?? "",
-          nombre: data?.nombre ?? "",
+          email:    data?.email    ?? "",
+          nombre:   data?.nombre   ?? "",
           apellido: data?.apellido ?? "",
-          dni: data?.dni ?? "",
+          dni:      data?.dni      ?? "",
         });
         if (data?.avatar_url) setAvatarPreview(data.avatar_url);
       } catch (e) {
@@ -78,55 +74,41 @@ export default function Perfil() {
     })();
   }, []);
 
-  // Handlers
   const onChange = (e) => {
     let { name, value } = e.target;
-    if (name === "dni") {
-      value = value.replace(/\D/g, "").slice(0, 8); // solo números, hasta 8
-    }
+    if (name === "dni") value = value.replace(/\D/g, "").slice(0, 8);
     setForm((p) => ({ ...p, [name]: value }));
   };
 
+  // ✅ Usa updatePerfilSmart (prioriza /usuarios/{id})
   const savePerfil = async (e) => {
     e.preventDefault();
     setSaving(true);
     setMsg("");
     try {
-      const payload = {};
-      if (typeof form.email === "string") payload.email = form.email.trim();
-      if (typeof form.nombre === "string") payload.nombre = form.nombre.trim();
-      if (typeof form.apellido === "string") payload.apellido = form.apellido.trim();
-      if (typeof form.dni === "string") payload.dni = form.dni.trim();
-
-      // ⬇️ Evita el 405: intenta /me (PUT/PATCH) y luego /{id}
-      const { data } = await updatePerfilSmart(payload, user?.id);
-
-      const newUser = {
-        ...(user || {}),
-        email:    data?.email    ?? payload.email    ?? form.email,
-        nombre:   data?.nombre   ?? payload.nombre   ?? form.nombre,
-        apellido: data?.apellido ?? payload.apellido ?? form.apellido,
-        dni:      data?.dni      ?? payload.dni      ?? form.dni,
+      const payload = {
+        email:    typeof form.email    === "string" ? form.email.trim()    : undefined,
+        nombre:   typeof form.nombre   === "string" ? form.nombre.trim()   : undefined,
+        apellido: typeof form.apellido === "string" ? form.apellido.trim() : undefined,
+        dni:      typeof form.dni      === "string" ? form.dni.trim()      : undefined,
       };
 
-      const newToken = data?.token || data?.access_token || data?.jwt || null;
+      const r = await updatePerfilSmart(payload);
+      const updated = r?.data || payload;
 
+      // Actualizar contexto/LS sin perder token
       if (setSession) {
-        if (newToken) {
-          setSession(newToken, newUser);
-        } else {
-          const current = getAuthToken();
-          setSession(current, newUser);
-        }
+        const currentToken = getAuthToken();
+        setSession(currentToken, updated);
       }
-      lsSetUser(newUser);
+      lsSetUser(updated);
 
       setForm((p) => ({
         ...p,
-        email: newUser.email,
-        nombre: newUser.nombre,
-        apellido: newUser.apellido,
-        dni: newUser.dni,
+        email:    updated.email    ?? p.email,
+        nombre:   updated.nombre   ?? p.nombre,
+        apellido: updated.apellido ?? p.apellido,
+        dni:      updated.dni      ?? p.dni,
       }));
 
       setMsg("Cambios guardados.");
@@ -227,7 +209,7 @@ export default function Perfil() {
 
           <form onSubmit={savePerfil} className="grid grid-cols-1 gap-6">
             <div className="grid grid-cols-1 md:grid-cols-[auto,1fr] gap-6 items-start">
-              {/* Avatar */}
+              {/* Columna izquierda: Avatar */}
               <div className="flex flex-col items-start gap-3">
                 <div className="h-[92px] w-[92px] rounded-full overflow-hidden border border-slate-200 bg-slate-50 grid place-items-center text-slate-400">
                   {avatarPreview ? (
@@ -265,10 +247,13 @@ export default function Perfil() {
                 </div>
 
                 <p className="text-[11px] text-slate-500">La foto se guarda localmente por ahora.</p>
-                {!!avatarMsg && <p className="text-xs text-slate-700">{avatarMsg}</p>}
+
+                {!!avatarMsg && (
+                  <p className="text-xs text-slate-700">{avatarMsg}</p>
+                )}
               </div>
 
-              {/* Campos */}
+              {/* Columna derecha: Campos */}
               <div className="grid gap-4">
                 <div>
                   <label className={LABEL}>Correo electrónico</label>
@@ -400,7 +385,7 @@ export default function Perfil() {
         </div>
       </div>
 
-      {/* Overlay de proceso */}
+      {/* Overlay */}
       {overlayBusy && (
         <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/50 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 p-6 text-center">

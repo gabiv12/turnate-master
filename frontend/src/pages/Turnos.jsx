@@ -618,9 +618,13 @@ export default function Turnos() {
             <div className="mt-3 rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200/70">
               <div className="text-xs font-semibold text-slate-700 mb-1">Sugerencias</div>
               <ul className="text-xs text-slate-600 space-y-1.5">
-                <li>• Configurá tus <b>Horarios</b>; los días no habilitados se ven en gris.</li>
-                <li>• La <b>duración</b> sale del servicio elegido.</li>
-                <li>• Si hay choque, el sistema marca <b>409</b>. Probá mover 5–10 min.</li>
+                 <li>
+      Primero cargá tus <strong>Horarios</strong>. Los días sin horario quedan grises y no se pueden reservar.
+    </li>
+    <li>
+      La <strong>duración</strong> de cada turno se toma del <strong>Servicio</strong> que elijas.
+    </li>
+
               </ul>
             </div>
           </div>

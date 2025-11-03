@@ -53,8 +53,10 @@ export default function Nosotros() {
   ];
 
   return (
-    <main className="min-h-screen bg-slate-50">
-      {/* HERO (más contraste) */}
+    // ➜ Separación segura del navbar fijo: pt-24 md:pt-28
+    //    (ajustá estos valores si tu navbar es más alto)
+    <main className="min-h-screen bg-slate-50 pt-24 md:pt-20">
+      {/* HERO (más contraste, centrado y con altura mínima) */}
       <section
         className="relative isolate overflow-hidden"
         aria-labelledby="hero-title"
@@ -63,35 +65,40 @@ export default function Nosotros() {
         <div className="absolute inset-0 -z-20 bg-gradient-to-r from-blue-600 to-cyan-400" />
         <div className="absolute inset-0 -z-10 bg-gradient-to-b from-slate-900/25 via-transparent to-slate-900/25" />
 
-        <div className="mx-auto max-w-6xl px-4 py-14 sm:py-16">
-          {/* Tarjeta translucida */}
-          <div className="max-w-3xl rounded-2xl bg-slate-900/25 backdrop-blur-[1px] ring-1 ring-white/10 p-6">
-            <h1
-              id="hero-title"
-              className="text-4xl sm:text-5xl font-bold tracking-tight text-white"
-            >
-              Organizá tus turnos sin enredos
-            </h1>
-            <p className="mt-4 text-white/95 text-lg">
-              Turnate es una turnera simple: tus clientes ven los horarios
-              libres y reservan; vos administrás todo desde un calendario fácil,
-              sin mensajes de ida y vuelta.
-            </p>
+        <div className="mx-auto max-w-6xl px-4">
+          {/* min-h para centrar vertical y darle “presencia” sin tapar nav */}
+          <div className="min-h-[48dvh] sm:min-h-[52dvh] grid place-items-center py-10 sm:py-14">
+            <div className="max-w-3xl rounded-2xl bg-slate-900/25 backdrop-blur-[1px] ring-1 ring-white/10 p-6 sm:p-7 md:p-8">
+              <h1
+                id="hero-title"
+                className="text-4xl sm:text-5xl font-bold tracking-tight text-white"
+              >
+                Organizá tus turnos sin enredos
+              </h1>
+              <p className="mt-4 text-white/95 text-lg">
+                Turnate es una turnera simple: tus clientes ven los horarios
+                libres y reservan; vos administrás todo desde un calendario fácil,
+                sin mensajes de ida y vuelta.
+              </p>
 
-            <div className="mt-6 flex flex-wrap gap-3">
-              <Link to="/reservar" className="btn-primary" aria-label="Probar como cliente">
-                Probar como cliente
-              </Link>
-              <Link to="/registro" className="btn-plain" aria-label="Crear mi cuenta">
-                Crear mi cuenta
-              </Link>
+              <div className="mt-6 flex flex-wrap gap-3">
+                <Link to="/reservar" className="btn-primary" aria-label="Probar como cliente">
+                  Probar como cliente
+                </Link>
+                <Link to="/registro" className="btn-plain" aria-label="Crear mi cuenta">
+                  Crear mi cuenta
+                </Link>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
       {/* BENEFICIOS */}
-      <section className="mx-auto max-w-6xl px-4 py-10" aria-labelledby="beneficios-title">
+      <section
+        className="mx-auto max-w-6xl px-4 py-10 scroll-mt-28"
+        aria-labelledby="beneficios-title"
+      >
         <h2 id="beneficios-title" className="sr-only">
           Beneficios
         </h2>
@@ -109,7 +116,10 @@ export default function Nosotros() {
       </section>
 
       {/* CÓMO FUNCIONA */}
-      <section className="mx-auto max-w-6xl px-4 py-6" aria-labelledby="pasos-title">
+      <section
+        className="mx-auto max-w-6xl px-4 py-6 scroll-mt-28"
+        aria-labelledby="pasos-title"
+      >
         <h2 id="pasos-title" className="text-2xl font-semibold text-slate-900">
           ¿Cómo funciona?
         </h2>
@@ -132,7 +142,10 @@ export default function Nosotros() {
       </section>
 
       {/* ¿PARA QUIÉN SIRVE? */}
-      <section className="mx-auto max-w-6xl px-4 py-6" aria-labelledby="publico-title">
+      <section
+        className="mx-auto max-w-6xl px-4 py-6 scroll-mt-28"
+        aria-labelledby="publico-title"
+      >
         <h2 id="publico-title" className="text-2xl font-semibold text-slate-900">
           Pensado para cualquier profesional
         </h2>
@@ -148,7 +161,10 @@ export default function Nosotros() {
       </section>
 
       {/* MÉTRICAS (ficticias) */}
-      <section className="mx-auto max-w-6xl px-4 py-6" aria-labelledby="metricas-title">
+      <section
+        className="mx-auto max-w-6xl px-4 py-6 scroll-mt-28"
+        aria-labelledby="metricas-title"
+      >
         <h2 id="metricas-title" className="sr-only">
           Métricas
         </h2>
@@ -168,8 +184,11 @@ export default function Nosotros() {
         </div>
       </section>
 
-      {/* LO QUE TE LLEVA A LA ACCIÓN */}
-      <section className="mx-auto max-w-6xl px-4 py-6" aria-labelledby="cta-simple-title">
+      {/* CTA SIMPLE */}
+      <section
+        className="mx-auto max-w-6xl px-4 py-6 scroll-mt-28"
+        aria-labelledby="cta-simple-title"
+      >
         <h2 id="cta-simple-title" className="sr-only">
           Empezá hoy
         </h2>
@@ -193,43 +212,11 @@ export default function Nosotros() {
         </div>
       </section>
 
-      {/* PREGUNTAS FRECUENTES */}
-      <section className="mx-auto max-w-6xl px-4 py-8" aria-labelledby="faq-title">
-        <h2 id="faq-title" className="text-2xl font-semibold text-slate-900">
-          Preguntas frecuentes
-        </h2>
-        <div className="mt-4 grid grid-cols-1 gap-4">
-          <details className="group rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-            <summary className="cursor-pointer select-none font-medium text-slate-900">
-              ¿Mis clientes tienen que descargar algo?
-            </summary>
-            <p className="mt-2 text-sm text-slate-600">
-              No. Solo entran al link, pegan tu código público y reservan. Listo.
-            </p>
-          </details>
-
-          <details className="group rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-            <summary className="cursor-pointer select-none font-medium text-slate-900">
-              ¿Puedo mover o cancelar un turno?
-            </summary>
-            <p className="mt-2 text-sm text-slate-600">
-              Sí. Desde tu calendario podés editar, reprogramar o cancelar en segundos.
-            </p>
-          </details>
-
-          <details className="group rounded-2xl bg-white p-6 shadow-sm ring-1 ring-slate-200">
-            <summary className="cursor-pointer select-none font-medium text-slate-900">
-              ¿Y si no me llevo bien con la tecnología?
-            </summary>
-            <p className="mt-2 text-sm text-slate-600">
-              No te preocupes: todo está explicado paso a paso. En minutos lo tenés funcionando.
-            </p>
-          </details>
-        </div>
-      </section>
-
       {/* CTA FINAL */}
-      <section className="mx-auto max-w-6xl px-4 py-12" aria-labelledby="cta-final-title">
+      <section
+        className="mx-auto max-w-6xl px-4 py-12 scroll-mt-28"
+        aria-labelledby="cta-final-title"
+      >
         <h2 id="cta-final-title" className="sr-only">
           Ordená tu agenda y ganá tiempo
         </h2>

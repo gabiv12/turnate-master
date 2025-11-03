@@ -1,6 +1,6 @@
-# ---------------------------
-# Python
-# ---------------------------
+# =========================================================
+# 🐍 PYTHON / BACKEND
+# =========================================================
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -53,18 +53,21 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# Django stuff
+# Django / Flask / FastAPI configs
 *.log
 local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff
 instance/
 .webassets-cache
 
-# Scrapy stuff
-.scrapy
+# SQLite / local databases
+*.db
+*.sqlite3
+*.sqlite3-journal
+dev.db
+
+# Scripts o seeds que deben ignorarse
+backend/app/scripts/__pycache__/
+backend/app/scripts/*.bak
 
 # Sphinx documentation
 docs/_build/
@@ -80,17 +83,11 @@ target/
 profile_default/
 ipython_config.py
 
-# pyenv
+# pyenv / Pipenv / Poetry / PDM
 .python-version
-
-# pipenv
 Pipfile.lock
-
-# poetry
 poetry.lock
 poetry.toml
-
-# pdm
 pdm.lock
 .pdm.toml
 __pypackages__/
@@ -121,62 +118,106 @@ venv.bak/
 # mypy, Pyre, pytype
 .mypy_cache/
 .dmypy.json
-.dmypy.json
 .pyre/
 .pytype/
 cython_debug/
 
-# ---------------------------
-# Node.js / Frontend
-# ---------------------------
+# =========================================================
+# ⚛️ NODE.JS / FRONTEND
+# =========================================================
 
 # Node modules
 node_modules/
+
+# Build / Dist folders
+dist/
+build/
 
 # Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Build directories
-dist/
-build/
-
-# Environment files
+# Local environment files
 .env
 .env.local
-.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
 
-# ---------------------------
-# VSCode
-# ---------------------------
+# Frontend cache / coverage
+.cache/
+coverage/
+*.log
+
+# Frontend generated archives
+frontend/frontend.zip
+
+# =========================================================
+# 🧩 VS CODE / EDITORS
+# =========================================================
+
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
 !.vscode/*.code-snippets
+.idea/
+*.sublime-project
+*.sublime-workspace
 .history/
 .ionide
 *.vsix
 
-# ---------------------------
-# Misc / Databases
-# ---------------------------
+# =========================================================
+# 🗄️ DATABASES / MISC
+# =========================================================
+
+# Common DB / Logs
 *.db
 *.sqlite3
 *.sqlite3-journal
 *.log
+*.pid
 
-# ---------------------------
-# IDEs / Editors
-# ---------------------------
-.idea/
-*.sublime-project
-*.sublime-workspace
+# Local or temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
 
-# ---------------------------
-# OS files
-# ---------------------------
+# Ignore backup data or seeds
+backup/
+dump.sql
+dump/
+*.sql~
+
+# =========================================================
+# 💻 OS FILES
+# =========================================================
+
 .DS_Store
 Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# =========================================================
+# ✅ EXCEPTIONS (KEEP THESE FILES TRACKED)
+# =========================================================
+
+# Keep important VSCode configs
+!.vscode/settings.json
+!.vscode/launch.json
+
+# Keep documentation
+!README.md
+!LICENSE
+!requirements.txt
+!package.json
+!package-lock.json
+!frontend/src/
+!backend/app/
+
