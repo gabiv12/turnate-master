@@ -1,15 +1,12 @@
 import React from "react";
 
-const Loader = () => {
+export default function Loader({ text = "Cargando..." }) {
   return (
-    <div className="absolute right-1/2 bottom-1/2 transform translate-x-1/2 translate-y-1/2">
-      <div className="p-4 bg-gradient-to-tr animate-spin from-green-500 to-blue-500 via-purple-500 rounded-full">
-        <div className="bg-white rounded-full">
-          <div className="w-24 h-24 rounded-full"></div>
-        </div>
+    <div className="fixed inset-0 z-[70] flex flex-col items-center justify-center bg-white/70 backdrop-blur-sm">
+      <div className="relative w-12 h-12 mb-3">
+        <div className="absolute inset-0 rounded-full border-4 border-t-transparent border-blue-500 animate-spin"></div>
       </div>
+      <p className="text-slate-700 font-medium">{text}</p>
     </div>
   );
-};
-
-export default Loader;
+}

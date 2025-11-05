@@ -83,14 +83,14 @@ export default function Reservar() {
   const { codigo } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const { user } = useUser(); // ← tomamos datos del usuario logueado
+  const { user } = useUser();
 
   const [emp, setEmp] = useState(null);
   const [servicios, setServicios] = useState([]);
   const [horarios, setHorarios] = useState([]);
   const [turnos, setTurnos] = useState([]);
 
-  // Paso 1 (nuevo orden): día
+  // Paso 1: día
   const [fecha, setFecha] = useState(null);
   // Paso 2: servicio
   const [servicioId, setServicioId] = useState("");
@@ -181,7 +181,7 @@ export default function Reservar() {
 
       for (let d = new Date(base); d < blockEnd; d = addMinutes(d, step)) {
         const end = addMinutes(new Date(d), dur);
-        if (end > blockEnd) continue; // debe terminar dentro del bloque
+        if (end > blockEnd) continue;
         const choca = ocupadosDelDia.some((o) => o.inicio < end && o.fin > d);
         if (!choca) list.push({ start: new Date(d), blockEnd: new Date(blockEnd) });
       }
@@ -207,7 +207,6 @@ export default function Reservar() {
     if (!emp?.codigo_cliente || !servicioSel || !slot) return;
     if (!isAuth) return;
 
-    // Tomar datos del usuario logueado (cliente o emprendedor)
     const cliente_nombre = sanitize(user?.nombre || user?.username || (user?.email || "Cliente").split("@")[0]);
     const cliente_contacto = sanitize(user?.email || user?.telefono || "-");
 
@@ -227,7 +226,7 @@ export default function Reservar() {
         await api.post("/publico/turnos", withNota);
       } catch (e) {
         if (e?.response?.status === 422) {
-          await api.post("/publico/turnos", basePayload); // si la API no admite nota, reintenta sin nota
+          await api.post("/publico/turnos", basePayload);
         } else {
           throw e;
         }
@@ -246,23 +245,15 @@ export default function Reservar() {
       });
 
       alert("¡Reserva creada!");
-      // reset de selección
       setServicioId("");
       setSlot(null);
       setNota("");
-      // dejamos el día seleccionado para que pueda seguir reservando
     } catch (e) {
       alert(msgFrom(e, "No se pudo crear la reserva."));
     } finally {
       setBusy(false);
     }
   }
-
-  /* ===== Depuración ===== */
-  const dbgSvc = servicios?.length || 0;
-  const dbgHrs = horarios?.length || 0;
-  const dbgT = asArr(turnos).length || 0;
-  const dbgSlots = slots.length || 0;
 
   return (
     <div ref={refTop} className="pt-24">
@@ -339,14 +330,7 @@ export default function Reservar() {
 
         {/* Paso 3: Horario */}
         <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl md:text-2xl font-semibold text-slate-900">3) Elegí un horario</h2>
-            <div className="text-xs text-slate-500">
-              <span className="inline-block rounded bg-slate-100 px-2 py-1 ring-1 ring-slate-200">
-                svc:{servicios?.length || 0} · hrs:{horarios?.length || 0} · t:{asArr(turnos).length || 0} · slots:{slots.length || 0}
-              </span>
-            </div>
-          </div>
+          <h2 className="text-xl md:text-2xl font-semibold text-slate-900">3) Elegí un horario</h2>
 
           {!fecha ? (
             <div className="mt-4 text-sm text-slate-500">Primero elegí un día.</div>
@@ -384,14 +368,12 @@ export default function Reservar() {
             {slot ? <>Vas a reservar el <b>{format(slot.start, "EEEE d 'de' MMMM", { locale: es })}</b> a las <b>{format(slot.start, "HH:mm")}</b>.</> : <>Elegí día y horario.</>}
           </p>
 
-          {/* Info del usuario (se usa para grabar el turno) */}
           {isAuth && (
             <div className="mt-3 text-xs text-slate-600">
               Se guardará a nombre de <b>{user?.nombre || user?.username || user?.email}</b> ({user?.email || "sin email"}).
             </div>
           )}
 
-          {/* Nota opcional */}
           <div className="mt-4">
             <label className="block text-sm text-slate-700">Nota (opcional)</label>
             <input
@@ -403,8 +385,6 @@ export default function Reservar() {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            
-
             {!isAuth && (
               <span className="text-sm text-slate-600">
                 Necesitás iniciar sesión. <Link className="underline" to="/login" state={{ from: location }}>Ir al login</Link>
@@ -414,19 +394,18 @@ export default function Reservar() {
 
           {isAuth && servicioSel && slot && (
             <button
-  type="button"
-  onClick={crearReserva}
-  className="rounded-xl px-5 py-3 text-sm font-semibold text-white
-             bg-gradient-to-r from-sky-600 to-indigo-600
-             shadow-md hover:brightness-110 active:scale-[0.99]
-             focus:outline-none focus:ring-2 focus:ring-sky-300 flex items-center gap-2"
->
-  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-    <path d="M5 12h14M12 5l7 7-7 7" />
-  </svg>
-  Crear reserva
-</button>
-
+              type="button"
+              onClick={crearReserva}
+              className="rounded-xl px-5 py-3 text-sm font-semibold text-white
+                         bg-gradient-to-r from-sky-600 to-indigo-600
+                         shadow-md hover:brightness-110 active:scale-[0.99]
+                         focus:outline-none focus:ring-2 focus:ring-sky-300 flex items-center gap-2"
+            >
+              <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M5 12h14M12 5l7 7-7 7" />
+              </svg>
+              Crear reserva
+            </button>
           )}
         </section>
       </div>

@@ -7,7 +7,7 @@ import {
   startOfWeek as dfStartOfWeek,
   getDay as dfGetDay,
 } from "date-fns";
-import es from "date-fns/locale/es";
+import { es } from "date-fns/locale";
 import "react-big-calendar/lib/css/react-big-calendar.css";
 
 // Localizer con date-fns + español
@@ -48,6 +48,7 @@ export default function Calendario({
   onSelectEvent,
   onSelectSlot,
   onRangeChange,
+  onRangeRequest, // puente opcional
   // opciones visuales
   defaultView = "month",
   height = 700,
@@ -65,10 +66,24 @@ export default function Calendario({
       .filter((e) => !isNaN(+e.start) && !isNaN(+e.end));
   }, [turnos]);
 
+  // Bridge RBC → onRangeRequest(start, end) si te lo pasan
+  const handleRangeChange = (range) => {
+    onRangeChange?.(range);
+    if (!onRangeRequest) return;
+    if (Array.isArray(range)) {
+      const start = range[0];
+      const end = range[range.length - 1];
+      onRangeRequest(start, end);
+    } else if (range?.start && range?.end) {
+      onRangeRequest(range.start, range.end);
+    }
+  };
+
   return (
     <div className="w-full" style={{ height }}>
       <Calendar
         localizer={localizer}
+        culture="es"
         messages={messagesES}
         defaultView={defaultView}
         views={[Views.MONTH, Views.WEEK, Views.DAY, Views.AGENDA]}
@@ -80,7 +95,7 @@ export default function Calendario({
         longPressThreshold={220}
         onSelectEvent={onSelectEvent}
         onSelectSlot={onSelectSlot}
-        onRangeChange={onRangeChange}
+        onRangeChange={handleRangeChange}
         eventPropGetter={eventPropGetter}
         dayPropGetter={dayPropGetter}
         toolbar

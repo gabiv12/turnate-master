@@ -1,6 +1,6 @@
 // src/pages/AdminReportes.jsx
 import { useEffect, useMemo, useState } from "react";
-import api from "../services/api"; // (unificado con el resto del proyecto)
+import api from "../services/api";
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -9,9 +9,6 @@ import {
 import { format } from "date-fns";
 import es from "date-fns/locale/es";
 
-/* ================================
-   Estilo y helpers de formato
-==================================*/
 const PALETTE = [
   "#2563eb", "#0ea5e9", "#22c55e", "#f59e0b", "#ef4444", "#9333ea",
   "#14b8a6", "#f97316", "#84cc16", "#8b5cf6", "#06b6d4", "#dc2626",
@@ -21,26 +18,33 @@ const currency = new Intl.NumberFormat("es-AR", {
   style: "currency", currency: "ARS", maximumFractionDigits: 0,
 });
 
-function toISODateOnly(d) {
-  if (!d) return null;
-  const dt = new Date(d);
-  dt.setHours(0, 0, 0, 0);
-  return dt.toISOString().slice(0, 10);
+function toLocalYMD(dateLike) {
+  const d = dateLike instanceof Date ? dateLike : new Date(dateLike);
+  return [
+    d.getFullYear(),
+    String(d.getMonth() + 1).padStart(2, "0"),
+    String(d.getDate()).padStart(2, "0"),
+  ].join("-");
 }
-function spanToISOString(desdeYYYYMMDD, hastaYYYYMMDD) {
-  const d = new Date(`${desdeYYYYMMDD}T00:00:00.000Z`);
-  const h = new Date(`${hastaYYYYMMDD}T23:59:59.999Z`);
-  return { desdeISO: d.toISOString(), hastaISO: h.toISOString() };
+function addDaysYMD(ymd, n) {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + n);
+  return toLocalYMD(dt);
 }
-function addDays(dateYYYYMMDD, num) {
-  const d = new Date(`${dateYYYYMMDD}T00:00:00`);
-  d.setDate(d.getDate() + num);
-  return toISODateOnly(d);
+function diffDaysYMD(a, b) {
+  const [ay, am, ad] = a.split("-").map(Number);
+  const [by, bm, bd] = b.split("-").map(Number);
+  const A = new Date(ay, am - 1, ad);
+  const B = new Date(by, bm - 1, bd);
+  return Math.round((B - A) / 86400000);
 }
-function diffDays(aYYYYMMDD, bYYYYMMDD) {
-  const a = new Date(`${aYYYYMMDD}T00:00:00`);
-  const b = new Date(`${bYYYYMMDD}T00:00:00`);
-  return Math.round((b - a) / (1000 * 60 * 60 * 24));
+function spanToISOString(desdeYMD, hastaYMD) {
+  const [y1, m1, d1] = desdeYMD.split("-").map(Number);
+  const [y2, m2, d2] = hastaYMD.split("-").map(Number);
+  const start = new Date(Date.UTC(y1, m1 - 1, d1, 0, 0, 0, 0));
+  const end   = new Date(Date.UTC(y2, m2 - 1, d2, 23, 59, 59, 999));
+  return { desdeISO: start.toISOString(), hastaISO: end.toISOString() };
 }
 function pctDiff(current, previous) {
   const c = Number(current) || 0;
@@ -53,124 +57,179 @@ function csvEscape(v) {
   return `"${String(v ?? "").replace(/"/g, '""')}"`;
 }
 
-/* ================================
-   Página
-==================================*/
-export default function AdminReportes() {
-  // Rango por defecto: últimos 30 días
-  const now = new Date();
-  const d30 = new Date(now); d30.setDate(now.getDate() - 30);
-  const [desde, setDesde] = useState(toISODateOnly(d30));
-  const [hasta, setHasta] = useState(toISODateOnly(now));
+function normList(resp) {
+  if (!resp) return [];
+  if (Array.isArray(resp)) return resp;
+  if (Array.isArray(resp.items)) return resp.items;
+  if (Array.isArray(resp.results)) return resp.results;
+  if (Array.isArray(resp.data)) return resp.data;
+  const onlyKey = Object.keys(resp || {}).find((k) => Array.isArray(resp[k]));
+  if (onlyKey) return resp[onlyKey];
+  return [];
+}
 
-  // Datos actuales
+function mapTurno(t) {
+  const inicioRaw = t.inicio ?? t.desde ?? t.start ?? t.datetime ?? t.fecha_inicio ?? t.fecha;
+  const dt = inicioRaw ? new Date(inicioRaw) : null;
+  const fechaISO = dt && !isNaN(dt) ? dt.toISOString().slice(0,10) : null;
+  const servicio = t.servicio_nombre ?? t.servicio ?? t?.servicio?.nombre ?? "Servicio";
+  const precio = Number(t.precio || t.precio_aplicado || t.monto || 0);
+  const estado = String(t.estado ?? "confirmado");
+
+  return {
+    id: String(t.id ?? t.uuid ?? `${servicio}-${inicioRaw ?? Math.random()}`),
+    fechaISO,
+    fecha: dt && !isNaN(dt) ? format(dt, "dd/MM/yyyy", { locale: es }) : "—",
+    hora:  dt && !isNaN(dt) ? format(dt, "HH:mm") : "—",
+    cliente: t.cliente_nombre || t.cliente || t?.cliente?.nombre || "—",
+    servicio,
+    precio,
+    estado,
+  };
+}
+
+export default function AdminReportes() {
+  const now = new Date();
+  const ymdToday = toLocalYMD(now);
+  const ymd30 = addDaysYMD(ymdToday, -30 + 1);
+
+  const [desde, setDesde] = useState(ymd30);
+  const [hasta, setHasta] = useState(ymdToday);
+
   const [kpis, setKpis] = useState({ usuarios: 0, emprendedores: 0, turnos: 0, cancelados: 0, ingresos: 0 });
-  const [servAgg, setServAgg] = useState([]);   // [{servicio, cantidad, ingresos}]
+  const [prevKpis, setPrevKpis] = useState({ usuarios: 0, emprendedores: 0, turnos: 0, cancelados: 0, ingresos: 0 });
+  const [servAgg, setServAgg] = useState([]);
   const [turnos, setTurnos] = useState([]);
 
-  // Datos período anterior (para comparar)
-  const [prevKpis, setPrevKpis] = useState({ usuarios: 0, emprendedores: 0, turnos: 0, cancelados: 0, ingresos: 0 });
-
-  // Estado UI
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
+  const [info, setInfo] = useState("");
 
-  // Presets de fechas para “un click”
   const presets = [
     { label: "Últimos 7 días", range: () => {
-      const h = toISODateOnly(now);
-      const d = toISODateOnly(addDays(h, -6));
+      const h = toLocalYMD(new Date());
+      const d = addDaysYMD(h, -6);
       return { d, h };
     }},
     { label: "Últimos 30 días", range: () => {
-      const h = toISODateOnly(now);
-      const d = toISODateOnly(addDays(h, -29));
+      const h = toLocalYMD(new Date());
+      const d = addDaysYMD(h, -29);
       return { d, h };
     }},
     { label: "Este mes", range: () => {
-      const y = now.getFullYear(), m = now.getMonth();
-      const d = toISODateOnly(new Date(y, m, 1));
-      const h = toISODateOnly(new Date(y, m + 1, 0));
+      const base = new Date();
+      const d = toLocalYMD(new Date(base.getFullYear(), base.getMonth(), 1));
+      const h = toLocalYMD(new Date(base.getFullYear(), base.getMonth() + 1, 0));
       return { d, h };
     }},
     { label: "Año en curso", range: () => {
-      const y = now.getFullYear();
-      const d = toISODateOnly(new Date(y, 0, 1));
-      const h = toISODateOnly(new Date(y, 11, 31));
+      const y = new Date().getFullYear();
+      const d = toLocalYMD(new Date(y, 0, 1));
+      const h = toLocalYMD(new Date(y, 11, 31));
       return { d, h };
     }},
   ];
 
-  // Carga de datos
+  async function getJSON(url, params) {
+    const r = await api.get(url, { params });
+    return r.data;
+  }
+
+  async function tryAdminLiteOrFallback(span, prevSpan) {
+    setInfo("");
+    try {
+      const [kpisData, aggData, tData] = await Promise.all([
+        getJSON("/admin-lite/kpis", { desde: span.desdeISO, hasta: span.hastaISO }),
+        getJSON("/admin-lite/servicios-agg", { desde: span.desdeISO, hasta: span.hastaISO }),
+        getJSON("/admin-lite/turnos", { desde: span.desdeISO, hasta: span.hastaISO, limit: 1000 }),
+      ]);
+      const prevKpisData = await getJSON("/admin-lite/kpis", { desde: prevSpan.desdeISO, hasta: prevSpan.hastaISO });
+      return { mode: "lite", kpisData, aggData, tData, prevKpisData };
+    } catch {
+      try {
+        const resumen = await getJSON("/admin/resumen", {});
+        const kpisData = {
+          usuarios: Number(resumen.total_usuarios || 0),
+          emprendedores: Number(resumen.total_emprendedores || 0),
+          turnos: Number(resumen.turnos_mes || 0),
+          cancelados: 0,
+          ingresos: 0,
+        };
+        const prevKpisData = { usuarios: 0, emprendedores: 0, turnos: 0, cancelados: 0, ingresos: 0 };
+        setInfo("Estás viendo un resumen mensual. Para reportes detallados, habilitá /admin-lite/* en el backend.");
+        return { mode: "resumen", kpisData, aggData: [], tData: [], prevKpisData };
+      } catch (e2) {
+        throw e2;
+      }
+    }
+  }
+
   async function load() {
     setLoading(true);
     setMsg("");
+    setInfo("");
     try {
-      // Período actual
-      const { desdeISO, hastaISO } = spanToISOString(desde, hasta);
+      if (!desde || !hasta) {
+        setMsg("Elegí un rango de fechas válido.");
+        setLoading(false);
+        return;
+      }
+      const span = spanToISOString(desde, hasta);
 
-      // Período anterior de la misma duración
-      const days = Math.max(1, diffDays(desde, hasta) + 1);
-      const prevHasta = addDays(desde, -1);
-      const prevDesde = addDays(prevHasta, -(days - 1));
+      const days = Math.max(1, diffDaysYMD(desde, hasta) + 1);
+      const prevHasta = addDaysYMD(desde, -1);
+      const prevDesde = addDaysYMD(prevHasta, -(days - 1));
       const prevSpan = spanToISOString(prevDesde, prevHasta);
 
-      // Llamadas actuales
-      const [kpisRes, aggRes, tRes, prevKpisRes] = await Promise.all([
-        api.get("/admin-lite/kpis", { params: { desde: desdeISO, hasta: hastaISO } }),
-        api.get("/admin-lite/servicios-agg", { params: { desde: desdeISO, hasta: hastaISO } }),
-        api.get("/admin-lite/turnos", { params: { desde: desdeISO, hasta: hastaISO, limit: 200 } }),
-        api.get("/admin-lite/kpis", { params: { desde: prevSpan.desdeISO, hasta: prevSpan.hastaISO } }),
-      ]);
+      const { kpisData, aggData, tData } = await tryAdminLiteOrFallback(span, prevSpan);
 
-      // KPIs actuales y anteriores
       setKpis({
-        usuarios: Number(kpisRes?.data?.usuarios || 0),
-        emprendedores: Number(kpisRes?.data?.emprendedores || 0),
-        turnos: Number(kpisRes?.data?.turnos || 0),
-        cancelados: Number(kpisRes?.data?.cancelados || 0),
-        ingresos: Number(kpisRes?.data?.ingresos || 0),
-      });
-      setPrevKpis({
-        usuarios: Number(prevKpisRes?.data?.usuarios || 0),
-        emprendedores: Number(prevKpisRes?.data?.emprendedores || 0),
-        turnos: Number(prevKpisRes?.data?.turnos || 0),
-        cancelados: Number(prevKpisRes?.data?.cancelados || 0),
-        ingresos: Number(prevKpisRes?.data?.ingresos || 0),
+        usuarios: Number(kpisData.usuarios || 0),
+        emprendedores: Number(kpisData.emprendedores || 0),
+        turnos: Number(kpisData.turnos || 0),
+        cancelados: Number(kpisData.cancelados || 0),
+        ingresos: Number(kpisData.ingresos || 0),
       });
 
-      // Agregados por servicio
-      const agg = Array.isArray(aggRes?.data) ? aggRes.data : [];
-      const normAgg = agg.map((x) => ({
-        servicio: x.servicio || x.nombre || "Servicio",
-        cantidad: Number(x.cantidad || x.count || 0),
-        ingresos: Number(x.ingresos || x.amount || 0),
-      }));
+      try {
+        const prev = await getJSON("/admin-lite/kpis", { desde: prevSpan.desdeISO, hasta: prevSpan.hastaISO });
+        setPrevKpis({
+          usuarios: Number(prev.usuarios || 0),
+          emprendedores: Number(prev.emprendedores || 0),
+          turnos: Number(prev.turnos || 0),
+          cancelados: Number(prev.cancelados || 0),
+          ingresos: Number(prev.ingresos || 0),
+        });
+      } catch {
+        setPrevKpis({ usuarios: 0, emprendedores: 0, turnos: 0, cancelados: 0, ingresos: 0 });
+      }
+
+      const normAgg = Array.isArray(aggData)
+        ? aggData.map((x) => ({
+            servicio: x.servicio || x.nombre || "Servicio",
+            cantidad: Number(x.cantidad || x.count || 0),
+            ingresos: Number(x.ingresos || x.amount || 0),
+          }))
+        : [];
       setServAgg(normAgg);
 
-      // Turnos tabla
-      const raw = Array.isArray(tRes?.data) ? tRes.data
-                 : (Array.isArray(tRes?.data?.items) ? tRes.data.items : []);
-      const parsed = raw.map((t) => {
-        const dt = new Date(t.inicio || t.desde || t.start || t.datetime);
-        return {
-          id: t.id,
-          fechaISO: isNaN(dt) ? null : dt.toISOString().slice(0,10),
-          fecha: isNaN(dt) ? "—" : format(dt, "dd/MM/yyyy", { locale: es }),
-          hora: isNaN(dt) ? "—" : format(dt, "HH:mm"),
-          cliente: t.cliente_nombre || t.cliente || "—",
-          servicio: t.servicio_nombre || t.servicio || "Servicio",
-          precio: Number(t.precio || t.precio_aplicado || 0),
-          estado: t.estado || "confirmado",
-        };
-      });
+      const rawArr = Array.isArray(tData) ? tData : normList(tData);
+      const parsed = rawArr.map(mapTurno);
       setTurnos(parsed);
+
+      if (!rawArr.length) {
+        setInfo((prev) => prev || "No hay turnos en el período seleccionado.");
+      }
     } catch (e) {
-      console.error("AdminReportes: error cargando", e);
-      if (e?.response?.status === 401) {
-        setMsg("Necesitás iniciar sesión con una cuenta de administrador para ver este panel.");
+      const st = e?.response?.status;
+      if (st === 401 || st === 403) {
+        setMsg("Necesitás iniciar sesión con permisos de administrador para ver este panel.");
+      } else if (st === 404) {
+        setMsg("No se encontraron los endpoints de reportes. Verificá /admin-lite/* o /admin/resumen en el backend.");
+      } else if (st === 405) {
+        setMsg("El backend respondió 405 (método no permitido). Revisá que /admin-lite/* acepten GET.");
       } else {
-        setMsg("⚠️ No se pudieron cargar los datos. Verificá el backend /admin-lite.");
+        setMsg("No se pudieron cargar los datos. Revisá el backend.");
       }
       setKpis({ usuarios: 0, emprendedores: 0, turnos: 0, cancelados: 0, ingresos: 0 });
       setPrevKpis({ usuarios: 0, emprendedores: 0, turnos: 0, cancelados: 0, ingresos: 0 });
@@ -180,10 +239,9 @@ export default function AdminReportes() {
     }
   }
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { load(); }, []);
   const onApplyRange = () => load();
 
-  // ======== Comparaciones (vs. período anterior) ========
   const delta = {
     usuarios: pctDiff(kpis.usuarios, prevKpis.usuarios),
     emprendedores: pctDiff(kpis.emprendedores, prevKpis.emprendedores),
@@ -192,19 +250,15 @@ export default function AdminReportes() {
     ingresos: pctDiff(kpis.ingresos, prevKpis.ingresos),
   };
 
-  // ======== Gráficos =========
-  // Torta por cantidad / ingresos (servicios)
   const pieCantidad = servAgg.map((x, i) => ({ name: x.servicio, value: x.cantidad, color: PALETTE[i % PALETTE.length] }));
   const pieIngresos = servAgg.map((x, i) => ({ name: x.servicio, value: x.ingresos, color: PALETTE[i % PALETTE.length] }));
 
-  // Barras: Top servicios por cantidad
   const topServicios = [...servAgg]
     .sort((a, b) => (b.cantidad || 0) - (a.cantidad || 0))
     .slice(0, 8);
 
-  // Línea: Flujo de turnos por día (actividad)
   const turnosPorDia = useMemo(() => {
-    const map = new Map(); // yyyy-mm-dd -> {fecha, total, confirmados, cancelados}
+    const map = new Map();
     for (const t of turnos) {
       const k = t.fechaISO || "—";
       const ref = map.get(k) || { fecha: k, total: 0, confirmados: 0, cancelados: 0 };
@@ -213,13 +267,11 @@ export default function AdminReportes() {
       else ref.confirmados += 1;
       map.set(k, ref);
     }
-    const arr = [...map.values()].sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const arr = [...map.values()].sort((a, b) => (a.fecha || "").localeCompare(b.fecha || ""));
     return arr;
   }, [turnos]);
 
-  // ======== Exportar CSV =========
   function exportCSV() {
-    // encabezados claros
     const headers = [
       { key: "fecha", label: "Fecha" },
       { key: "hora", label: "Hora" },
@@ -237,17 +289,17 @@ export default function AdminReportes() {
     const a = document.createElement("a");
     a.href = url;
     a.download = `turnos_${desde}_a_${hasta}.csv`;
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }
 
-  // Totales para subtítulos
   const totalCant = servAgg.reduce((a, x) => a + (x.cantidad || 0), 0);
   const totalIng = servAgg.reduce((a, x) => a + (x.ingresos || 0), 0);
 
   return (
     <div className="min-h-[100dvh] flex flex-col">
-      {/* Header visual */}
       <header className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow mx-4 mt-4">
         <div className="mx-auto max-w-6xl">
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -266,20 +318,30 @@ export default function AdminReportes() {
               >
                 Exportar CSV
               </button>
+              <button
+                onClick={load}
+                className="rounded-xl bg-white/10 text-white px-4 py-2 text-sm font-semibold shadow hover:bg-white/20"
+                title="Recargar datos"
+              >
+                Actualizar
+              </button>
             </div>
           </div>
         </div>
       </header>
 
       <main className="mx-auto w-full max-w-6xl px-4 py-6 space-y-6">
-        {/* Mensaje */}
         {msg && (
           <div className="rounded-xl px-4 py-2 text-sm font-medium bg-red-50 text-red-700 ring-1 ring-red-200">
             {msg}
           </div>
         )}
+        {info && !msg && (
+          <div className="rounded-xl px-4 py-2 text-sm font-medium bg-amber-50 text-amber-800 ring-1 ring-amber-200">
+            {info}
+          </div>
+        )}
 
-        {/* Filtros de fecha + presets */}
         <section className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
           <div className="flex flex-col md:flex-row md:items-end gap-4">
             <div className="flex-1">
@@ -328,36 +390,31 @@ export default function AdminReportes() {
           </p>
         </section>
 
-        {/* KPIs + tendencia vs. período anterior */}
         <section className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4">
           <KPI title="Usuarios" value={kpis.usuarios} delta={delta.usuarios} help="Cuentas registradas en total." />
-          <KPI title="Emprendedores" value={kpis.emprendedores} delta={delta.emprendedores} help="Negocios activos en la plataforma." />
+          <KPI title="Emprendedores" value={kpis.emprendedores} delta={delta.emprendedores} help="Negocios activos." />
           <KPI title="Turnos" value={kpis.turnos} delta={delta.turnos} help="Turnos creados en el período." />
-          <KPI title="Cancelados" value={kpis.cancelados} delta={delta.cancelados} help="Turnos cancelados en el período." />
-          <KPI title="Ingresos" value={currency.format(kpis.ingresos)} delta={delta.ingresos} help="Total cobrado por turnos confirmados." />
+          <KPI title="Cancelados" value={kpis.cancelados} delta={delta.cancelados} help="Turnos cancelados." />
+          <KPI title="Ingresos" value={currency.format(kpis.ingresos)} delta={delta.ingresos} help="Total cobrado por confirmados." />
         </section>
 
-        {/* ¿Qué estoy viendo? */}
         <section className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
           <h3 className="text-base font-semibold text-slate-900 mb-2">Guía rápida</h3>
           <ul className="text-sm text-slate-700 list-disc pl-5 space-y-1">
             <li><b>Turnos</b> suma confirmados y cancelados. <b>Ingresos</b> usa solo confirmados.</li>
-            <li>La flecha verde/roja muestra el cambio respecto del <b>período anterior</b> (de igual duración).</li>
-            <li>Las <b>tortas</b> y <b>barras</b> ayudan a detectar qué servicios se venden más.</li>
-            <li>El <b>gráfico de línea</b> muestra la actividad diaria (subidas y bajadas).</li>
+            <li>La flecha verde/roja compara con el <b>período anterior</b> (misma duración).</li>
+            <li>Las <b>tortas</b> y <b>barras</b> muestran los servicios que más se usan/venden.</li>
+            <li>El <b>gráfico de línea</b> muestra la actividad por día.</li>
           </ul>
         </section>
 
-        {/* Gráficos principales */}
         <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-          {/* Tortas */}
           <Card title="Cantidad por servicio" subtitle={`${totalCant} turnos`}>
             <Donut data={pieCantidad} />
           </Card>
           <Card title="Ingresos por servicio" subtitle={currency.format(totalIng)}>
             <Donut data={pieIngresos} />
           </Card>
-          {/* Barras: Top 8 servicios */}
           <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-base font-semibold text-slate-900">Top servicios (por cantidad)</h3>
@@ -377,7 +434,6 @@ export default function AdminReportes() {
           </div>
         </section>
 
-        {/* Tendencia de actividad (línea) */}
         <section className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-base font-semibold text-slate-900">Actividad por día</h3>
@@ -397,7 +453,6 @@ export default function AdminReportes() {
           </div>
         </section>
 
-        {/* Tabla turnos */}
         <section className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-base font-semibold text-slate-900">Turnos del período</h3>
@@ -426,7 +481,7 @@ export default function AdminReportes() {
                 {turnos.length === 0 ? (
                   <tr>
                     <td colSpan="6" className="py-6 text-center text-slate-500">
-                      Sin turnos en el período seleccionado.
+                      {info || "Sin turnos en el período seleccionado."}
                     </td>
                   </tr>
                 ) : (
@@ -437,13 +492,13 @@ export default function AdminReportes() {
                       <td className="py-2 pr-4 text-slate-800">{r.cliente}</td>
                       <td className="py-2 pr-4 text-slate-800">{r.servicio}</td>
                       <td className="py-2 pr-4 text-slate-800">
-                        {r.estado.toLowerCase() === "cancelado" ? "—" : currency.format(r.precio || 0)}
+                        {String(r.estado).toLowerCase() === "cancelado" ? "—" : currency.format(r.precio || 0)}
                       </td>
                       <td className="py-2 pr-4">
                         <span
                           className={[
                             "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                            r.estado.toLowerCase() === "cancelado"
+                            String(r.estado).toLowerCase() === "cancelado"
                               ? "bg-slate-200 text-slate-700"
                               : "bg-emerald-100 text-emerald-700",
                           ].join(" ")}
@@ -463,9 +518,6 @@ export default function AdminReportes() {
   );
 }
 
-/* ================================
-   Subcomponentes
-==================================*/
 function Card({ title, subtitle, children }) {
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm">
@@ -479,11 +531,12 @@ function Card({ title, subtitle, children }) {
 }
 
 function Donut({ data }) {
+  const safe = Array.isArray(data) ? data : [];
   return (
     <ResponsiveContainer width="100%" height="100%">
       <PieChart>
         <Pie
-          data={data}
+          data={safe}
           dataKey="value"
           nameKey="name"
           innerRadius="55%"
@@ -493,9 +546,12 @@ function Donut({ data }) {
           labelLine={false}
           label={({ percent }) => `${Math.round((percent || 0) * 100)}%`}
         >
-          {data.map((entry, idx) => <Cell key={`slice-${idx}`} fill={entry.color} />)}
+          {safe.map((entry, idx) => <Cell key={`slice-${idx}`} fill={entry.color || PALETTE[idx % PALETTE.length]} />)}
         </Pie>
-        <Tooltip formatter={(v, n) => [typeof v === "number" ? v : 0, n]} contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0" }} />
+        <Tooltip
+          formatter={(v, n) => [typeof v === "number" ? v : 0, n]}
+          contentStyle={{ borderRadius: 12, border: "1px solid #e2e8f0" }}
+        />
       </PieChart>
     </ResponsiveContainer>
   );

@@ -47,7 +47,9 @@ export default function PanelShell() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-blue-600 to-cyan-400">
+    // <div className="min-h-screen bg-gradient-to-b from-blue-600 to-cyan-400">
+    <div className="min-h-screen bg-white">
+
       <Header />
 
       <div className="pt-24 pb-16">
@@ -65,8 +67,10 @@ export default function PanelShell() {
 
               <div
                 className={[
-                  "rounded-3xl p-[10px] shadow-lg overflow-hidden",
+                  // "rounded-3xl rounded-tr-none p-[10px] overflow-hidden",
                   "bg-gradient-to-b from-blue-700 to-cyan-500",
+                  "bg-blue-600",
+
                   open ? "block" : "hidden lg:block",
                 ].join(" ")}
               >

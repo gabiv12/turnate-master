@@ -20,7 +20,7 @@ class UsuarioBase(ORMModel):
     is_active: Optional[bool] = True
 
 class UsuarioCreate(ORMModel):
-    email: EmailStr
+    email: str
     password: str = Field(min_length=4)
     username: Optional[str] = None
     nombre: Optional[str] = None

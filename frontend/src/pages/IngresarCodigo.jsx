@@ -30,8 +30,8 @@ export default function IngresarCodigo() {
 
   return (
     <div className="space-y-5">
-      <div className="-mx-4 lg:-mx-6 overflow-x-clip">
-        <div className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-6 text-white shadow">
+      <div className="-ml-4 lg:-mx-6 overflow-x-clip">
+        <div className="bg-blue-600 p-6 text-white shadow">
           <div className="mx-auto max-w-3xl">
             <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">Reservar por código</h1>
             <p className="text-sm md:text-base/relaxed opacity-90 mt-1">

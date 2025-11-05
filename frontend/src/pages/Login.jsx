@@ -147,7 +147,7 @@ export default function Login() {
       <div className="min-h-[calc(100vh-240px)] flex items-center justify-center px-4">
         <div className="w-full max-w-md rounded-2xl border border-white/20 bg-white/90 shadow-2xl backdrop-blur">
           <div className="px-6 pt-6 text-center">
-            <div className="inline-flex items-center gap-3 select-none">
+            <div className="inline-flex items-center gap-1 select-none">
               <img
                 src={LOGO_SRC}
                 alt="Turnate"
@@ -155,9 +155,11 @@ export default function Login() {
                 onError={(e) => (e.currentTarget.style.display = "none")}
                 draggable="false"
               />
-              <span className="text-2xl font-extrabold tracking-tight bg-gradient-to-r from-white via-white to-emerald-200 bg-clip-text text-transparent drop-shadow">
+              <span className="text-2xl font-extrabold tracking-tight text-white drop-shadow-[0_2px_3px_rgba(0,0,0,0.8)]">
                 Turnate
               </span>
+
+
             </div>
             <h1 className="mt-3 text-xl font-semibold text-slate-800">Iniciar sesión</h1>
             <p className="text-sm text-slate-500">Accedé a tu cuenta para gestionar tus turnos.</p>
