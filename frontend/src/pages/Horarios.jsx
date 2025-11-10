@@ -1,7 +1,6 @@
 // src/pages/Horarios.jsx
 import { useEffect, useState } from "react";
 import api, { errorMessage } from "../services/api";
-import { useUser } from "../context/UserContext.jsx";
 
 const BTN =
   "rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700 disabled:opacity-60";
@@ -19,6 +18,19 @@ const DAYS = [
   { i: 0, name: "Domingo" },
 ];
 
+// === helpers de tiempo/validación ===
+function hhmm(v) {
+  if (!v) return "09:00";
+  const s = String(v);
+  const [h = "09", m = "00"] = s.split(":"); // soporta "HH:MM" o "HH:MM:SS"
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+const validBlock = (b) => {
+  const [h1, m1] = hhmm(b?.desde).split(":").map(Number);
+  const [h2, m2] = hhmm(b?.hasta).split(":").map(Number);
+  return h1 * 60 + m1 < h2 * 60 + m2;
+};
+
 function friendly(err) {
   if (typeof err === "string") return err;
   const s = err?.response?.status;
@@ -27,41 +39,64 @@ function friendly(err) {
   return err?.response?.data?.detail || err?.message || "No disponible por el momento.";
 }
 
-function hhmm(v) {
-  if (!v) return "09:00";
-  const [h = "09", m = "00"] = String(v).split(":");
-  return `${h.padStart(2, "0")}:${m.padStart(2, "0")}`;
-}
-
-// ==== Normalización desde el backend (GET /horarios/mis) ====
+// ==== Normalización robusta del GET /horarios/mis ====
 function normalizeIn(data) {
-  const items = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
-  const grouped = new Map();
+  let rows;
+  if (Array.isArray(data?.items)) rows = data.items;
+  else if (Array.isArray(data)) rows = data;
+  else if (data && typeof data === "object") {
+    // también acepta objetos { "1": {...}, "2": {...} }
+    const keys = Object.keys(data);
+    const isMap = keys.length > 0 && keys.every((k) => !isNaN(Number(k)));
+    if (isMap) rows = keys.map((k) => ({ dia_semana: Number(k), ...(data[k] || {}) }));
+  }
+  if (!Array.isArray(rows)) rows = [];
 
-  items.forEach((h) => {
-    const d = Number(h.dia_semana);
-    const row = grouped.get(d) || {
+  const byDay = new Map();
+
+  for (const r of rows) {
+    const day = Number(r?.dia_semana ?? r?.dia ?? r?.day ?? 0);
+    const interval = Number(r?.intervalo_min ?? r?.intervalo ?? 30) || 30;
+
+    const blocks = [];
+    if (Array.isArray(r?.bloques)) {
+      for (const b of r.bloques) {
+        blocks.push({
+          desde: hhmm(b?.desde ?? b?.inicio ?? b?.start),
+          hasta: hhmm(b?.hasta ?? b?.fin ?? b?.end),
+        });
+      }
+    }
+    // fila plana con tiempos
+    if ((r?.desde || r?.inicio || r?.start) || (r?.hasta || r?.fin || r?.end)) {
+      blocks.push({
+        desde: hhmm(r?.desde ?? r?.inicio ?? r?.start ?? "09:00"),
+        hasta: hhmm(r?.hasta ?? r?.fin ?? r?.end ?? "13:00"),
+      });
+    }
+
+    const prev = byDay.get(day) || { dia_semana: day, intervalo_min: 30, bloques: [], _flags: [] };
+    prev.intervalo_min = Number(interval ?? prev.intervalo_min ?? 30);
+    prev.bloques.push(...blocks);
+    const flag = r?.activo ?? r?.enabled ?? r?.is_active ?? r?.habilitado;
+    if (flag !== undefined) prev._flags.push(Boolean(flag));
+    byDay.set(day, prev);
+  }
+
+  // salida 0..6 con ‘activo’ calculado por bloques válidos o flags = true
+  const out = [];
+  for (let d = 0; d < 7; d++) {
+    const row = byDay.get(d) || { dia_semana: d, intervalo_min: 30, bloques: [], _flags: [] };
+    const hasValid = (row.bloques || []).some(validBlock);
+    const flagTrue = (row._flags || []).some(Boolean);
+    out.push({
       dia_semana: d,
-      activo: false,
-      intervalo_min: Number(h.intervalo_min ?? h.intervalo ?? 30),
-      bloques: [],
-    };
-    row.intervalo_min = Number(h.intervalo_min ?? h.intervalo ?? row.intervalo_min ?? 30);
-    (h.bloques || []).forEach((b) => {
-      row.bloques.push({ desde: hhmm(b.desde), hasta: hhmm(b.hasta) });
+      intervalo_min: Number(row.intervalo_min ?? 30) || 30,
+      bloques: (row.bloques || []).map((b) => ({ desde: hhmm(b.desde), hasta: hhmm(b.hasta) })),
+      activo: hasValid || flagTrue,
     });
-    // activo si hay algún bloque válido
-    row.activo = row.activo || row.bloques.some((b) => {
-      const [h1, m1] = hhmm(b.desde).split(":").map(Number);
-      const [h2, m2] = hhmm(b.hasta).split(":").map(Number);
-      return h1 * 60 + m1 < h2 * 60 + m2;
-    });
-    grouped.set(d, row);
-  });
-
-  return DAYS.map((d) =>
-    grouped.get(d.i) || { dia_semana: d.i, activo: false, intervalo_min: 30, bloques: [] }
-  );
+  }
+  return out;
 }
 
 // ==== Normalización para guardar (POST /horarios/mis) ====
@@ -80,7 +115,6 @@ function normalizeOut(rows) {
 }
 
 export default function Horarios() {
-  const { user } = useUser() || {};
   const [rows, setRows] = useState(() =>
     DAYS.map((d) => ({
       dia_semana: d.i,
@@ -99,7 +133,6 @@ export default function Horarios() {
       setLoading(true);
       setMsg("");
       try {
-        try { await api.get("/usuarios/me/emprendedor"); } catch {}
         const { data } = await api.get("/horarios/mis");
         setRows(normalizeIn(data));
       } catch (e) {
@@ -137,11 +170,7 @@ export default function Horarios() {
         return `En ${DAYS.find((d) => d.i === r.dia_semana)?.name}: agregá al menos un bloque.`;
       }
       for (const b of r.bloques || []) {
-        const [h1, m1] = hhmm(b.desde).split(":").map(Number);
-        const [h2, m2] = hhmm(b.hasta).split(":").map(Number);
-        const a = h1 * 60 + m1;
-        const z = h2 * 60 + m2;
-        if (a >= z) {
+        if (!validBlock(b)) {
           return `En ${DAYS.find((d) => d.i === r.dia_semana)?.name}: "Desde" debe ser menor que "Hasta".`;
         }
       }
@@ -169,8 +198,7 @@ export default function Horarios() {
       setRows(normalizeIn(data));
       setMsg("Horarios guardados.");
     } catch (e) {
-      // e ya llega como string desde el interceptor
-      setMsg(typeof e === "string" ? e : errorMessage(e));
+      setMsg(errorMessage(e));
     } finally {
       setLoading(false);
       setTimeout(() => setMsg(""), 2500);
@@ -179,6 +207,7 @@ export default function Horarios() {
 
   return (
     <div className="space-y-4">
+      {/* Encabezado consistente (no cambia estilos globales) */}
       <div className="-mx-4 lg:-mx-6 overflow-x-clip">
         <div className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow">
           <div className="mx-auto max-w-7xl px-4 lg:px-6">

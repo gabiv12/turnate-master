@@ -4,8 +4,13 @@ import { me } from "./usuarios";
 
 /* ==== Lecturas ==== */
 export async function miEmprendedor() {
-  const { data } = await api.get("/emprendedores/mi");
-  return data?.emprendedor || data;
+  try {
+    const r = await api.get("/emprendedores/mi");
+    return r.data || null;
+  } catch (e) {
+    if (e?.response?.status === 404) return null; // no tiene aún
+    throw e;
+  }
 }
 
 /* ==== Creación tolerante (para auto-recuperar 404) ==== */

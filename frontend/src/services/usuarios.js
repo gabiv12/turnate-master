@@ -1,138 +1,146 @@
 // src/services/usuarios.js
-import api, { setSession, getSession } from "./api";
-
-/* ================= Helpers de sesión ================= */
-function mergeUserInSession(nextUser) {
-  const { token, user } = getSession();
-  const merged = { ...(user || {}), ...(nextUser || {}) };
-  setSession({ token, user: merged });
-  return merged;
-}
-
-/* ================= Auth ================= */
+import api, { setSession, getAuthToken } from "./api";
 
 /**
- * LOGIN
- * Esperado: { token, user_schema } o { token, user }
+ * Login
+ * POST /usuarios/login
+ * Espera { email, password }
+ * Responde típicamente { token, user_schema } (según tu backend)
  */
 export async function login({ email, password }) {
-  const res = await api.post("/usuarios/login", { email, password });
-  const token = res?.data?.token || res?.data?.access_token || null;
-  const user  = res?.data?.user_schema || res?.data?.user || null;
-  setSession({ token, user });
-  return { token, user };
-}
+  const r = await api.post("/usuarios/login", { email, password });
+  const token =
+    r?.data?.token || r?.data?.access_token || r?.data?.accessToken || null;
+  const user =
+    r?.data?.user_schema || r?.data?.user || r?.data?.usuario || r?.data || null;
 
-/** PERFIL autenticado */
-export async function me() {
-  const res = await api.get("/usuarios/me");
-  return res.data || null;
+  if (token && user) setSession(token, user);
+  return user;
 }
 
 /**
- * REGISTRO
- * Fallbacks comunes: /usuarios/registrar, /usuarios/registro, /usuarios/register, /usuarios (POST)
- * Si el back devuelve token/user, guardamos sesión.
+ * Registro
+ * POST /usuarios/registro   (no uses /usuarios/registrar: devuelve 405)
+ * Acepta { email, password, nombre?, apellido?, dni? } (otros campos opcionales)
+ * Si el backend devuelve token + user, dejamos la sesión activa.
  */
 export async function register(payload) {
-  const candidates = [
-    "/usuarios/registrar",
-    "/usuarios/registro",
-    "/usuarios/register",
-    "/usuarios",
-  ];
+  const r = await api.post("/usuarios/registro", payload);
 
-  let lastErr = null;
-  for (const path of candidates) {
-    try {
-      const res = await api.post(path, payload);
-      const token = res?.data?.token || res?.data?.access_token || null;
-      const user  = res?.data?.user_schema || res?.data?.user || null;
-      if (token || user) {
-        setSession({
-          token: token ?? getSession().token,
-          user : user  ?? getSession().user,
-        });
-      }
-      return res.data || { ok: true };
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw lastErr ?? new Error("No se pudo registrar.");
+  const token =
+    r?.data?.token || r?.data?.access_token || r?.data?.accessToken || null;
+  const user =
+    r?.data?.user_schema || r?.data?.user || r?.data?.usuario || r?.data || null;
+
+  if (token && user) setSession(token, user);
+  return user ?? r?.data ?? null;
 }
 
 /**
- * ACTIVAR EMPRENDEDOR
- * Soporta que el back devuelva token y/o user nuevos.
+ * Usuario actual
+ * GET /usuarios/me
+ */
+export async function me() {
+  const r = await api.get("/usuarios/me");
+  return r?.data ?? null;
+}
+
+/**
+ * Activar modo emprendedor para un usuario
+ * PUT /usuarios/{id}/activar_emprendedor
+ * Tu backend suele devolver un token nuevo; si viene, lo guardamos.
  */
 export async function activarEmprendedor(userId) {
-  const res = await api.put(`/usuarios/${userId}/activar_emprendedor`);
-  const token = res?.data?.token || res?.data?.access_token || null;
-  const user  = res?.data?.user_schema || res?.data?.user || null;
-  if (token || user) {
-    setSession({
-      token: token ?? getSession().token,
-      user : user  ?? getSession().user,
-    });
-  }
-  return res.data;
-}
+  const r = await api.put(`/usuarios/${userId}/activar_emprendedor`);
+  const token =
+    r?.data?.token || r?.data?.access_token || r?.data?.accessToken || null;
+  const user =
+    r?.data?.user_schema || r?.data?.user || r?.data?.usuario || null;
 
-/* ================= Perfil (UPDATE) ================= */
+  // Si el backend devuelve token y user actualizados, refrescamos sesión.
+  if (token && user) setSession(token, user);
+  return r?.data ?? null;
+}
 
 /**
- * updatePerfilSmart(payload, userId?)
- * Intenta actualizar el perfil del usuario con varios endpoints comunes:
- * 1) PATCH /usuarios/me
- * 2) PUT   /usuarios/me
- * 3) PATCH /usuarios/{id}
- * 4) PUT   /usuarios/{id}
- * Si la respuesta trae el user actualizado, lo guarda en sesión; si no, re-lee /usuarios/me.
+ * Actualizar perfil (smart)
+ * Prioriza: PUT /usuarios/{id}
+ * Fallback: PUT /usuarios/me  o  PATCH /usuarios/me  (según permita el backend)
  */
-export async function updatePerfilSmart(payload, userId = null) {
-  const id = userId ?? getSession()?.user?.id ?? null;
+export async function updatePerfilSmart(payload) {
+  // 1) averiguamos ID
+  let uid = null;
+  try {
+    const u = await me();
+    uid = Number(u?.id ?? u?.user_id ?? u?.uid ?? null) || null;
+  } catch {
+    // si falla, seguimos con /usuarios/me
+  }
 
-  // candidatos ordenados por preferencia
-  const candidates = [
-    { method: "patch", url: "/usuarios/me" },
-    { method: "put",   url: "/usuarios/me" },
-    ...(id ? [
-      { method: "patch", url: `/usuarios/${id}` },
-      { method: "put",   url: `/usuarios/${id}` },
-    ] : []),
-  ];
-
-  let lastErr = null;
-  for (const c of candidates) {
+  // 2) intentamos PUT /usuarios/{id}
+  if (uid != null) {
     try {
-      const res = await api[c.method](c.url, payload);
-      const updated =
-        res?.data?.user_schema ||
-        res?.data?.user ||
-        res?.data ||
-        null;
-
-      if (updated) {
-        return mergeUserInSession(updated);
-      }
-
-      // si no vino user, re-leemos /me
+      const r = await api.put(`/usuarios/${uid}`, payload);
+      return r;
+    } catch (e1) {
+      // 405/404/… => fallback
+      // 3) fallback PUT /usuarios/me
       try {
-        const fresh = await me();
-        return mergeUserInSession(fresh || {});
-      } catch {
-        return getSession().user || null;
+        const r2 = await api.put("/usuarios/me", payload);
+        return r2;
+      } catch (e2) {
+        // 4) último intento: PATCH /usuarios/me
+        const r3 = await api.patch("/usuarios/me", payload);
+        return r3;
       }
-    } catch (e) {
-      lastErr = e;
-      // seguimos probando siguientes rutas
     }
   }
-  throw lastErr ?? new Error("No se pudo actualizar el perfil.");
+
+  // Sin uid: vamos directo a /usuarios/me con PUT y luego PATCH
+  try {
+    const r = await api.put("/usuarios/me", payload);
+    return r;
+  } catch (e2) {
+    const r3 = await api.patch("/usuarios/me", payload);
+    return r3;
+  }
 }
 
-/** Alias por compatibilidad con código existente */
-export const updatePerfil = updatePerfilSmart;
-export const registerUser = register;
-export async function registrar(datos) { return register(datos); }
+/**
+ * (Opcional) Cerrar sesión desde front (por si algún componente lo requiere)
+ * Simplemente limpia el token manteniendo compatibilidad con tu api.js
+ */
+export function logoutFront() {
+  setSession(null, null);
+}
+
+/**
+ * (Opcional) Subir avatar (si tu backend lo admite)
+ * POST /usuarios/me/avatar  (multipart/form-data con campo "file")
+ */
+export async function uploadAvatar(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await api.post("/usuarios/me/avatar", fd, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return r?.data ?? null;
+}
+
+/**
+ * (Helper) ¿estoy autenticado?
+ */
+export function isLoggedIn() {
+  return !!getAuthToken();
+}
+
+export default {
+  login,
+  register,
+  me,
+  activarEmprendedor,
+  updatePerfilSmart,
+  logoutFront,
+  uploadAvatar,
+  isLoggedIn,
+};

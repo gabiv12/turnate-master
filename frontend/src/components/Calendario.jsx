@@ -48,7 +48,7 @@ export default function Calendario({
   onSelectEvent,
   onSelectSlot,
   onRangeChange,
-  onRangeRequest, // puente opcional
+  onRangeRequest, // puente opcional para pedir al backend un rango
   // opciones visuales
   defaultView = "month",
   height = 700,
@@ -66,7 +66,7 @@ export default function Calendario({
       .filter((e) => !isNaN(+e.start) && !isNaN(+e.end));
   }, [turnos]);
 
-  // Bridge RBC → onRangeRequest(start, end) si te lo pasan
+  // Bridge RBC → onRangeRequest(start, end)
   const handleRangeChange = (range) => {
     onRangeChange?.(range);
     if (!onRangeRequest) return;
@@ -77,6 +77,16 @@ export default function Calendario({
     } else if (range?.start && range?.end) {
       onRangeRequest(range.start, range.end);
     }
+  };
+
+  // Colores suaves por estado (si no te pasan eventPropGetter)
+  const defaultEventPropGetter = (event) => {
+    const estado = String(event?.estado || "").toLowerCase();
+    let style = {};
+    if (estado.includes("cancel")) style = { backgroundColor: "#fee2e2", borderColor: "#fecaca", color: "#991b1b" };
+    else if (estado.includes("confirm") || estado.includes("ok")) style = { backgroundColor: "#dcfce7", borderColor: "#bbf7d0", color: "#065f46" };
+    else style = { backgroundColor: "#e0f2fe", borderColor: "#bae6fd", color: "#075985" };
+    return { style, className: "rounded-md" };
   };
 
   return (
@@ -96,7 +106,7 @@ export default function Calendario({
         onSelectEvent={onSelectEvent}
         onSelectSlot={onSelectSlot}
         onRangeChange={handleRangeChange}
-        eventPropGetter={eventPropGetter}
+        eventPropGetter={eventPropGetter || defaultEventPropGetter}
         dayPropGetter={dayPropGetter}
         toolbar
         step={30}
@@ -104,6 +114,8 @@ export default function Calendario({
         formats={{
           timeGutterFormat: (date) => dfFormat(date, "HH:mm", { locale: es }),
           eventTimeRangeFormat: ({ start, end }) =>
+            `${dfFormat(start, "HH:mm", { locale: es })} – ${dfFormat(end, "HH:mm", { locale: es })}`,
+          agendaTimeRangeFormat: ({ start, end }) =>
             `${dfFormat(start, "HH:mm", { locale: es })} – ${dfFormat(end, "HH:mm", { locale: es })}`,
         }}
       />

@@ -1,21 +1,21 @@
 // src/pages/Turnos.jsx
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import Calendario from "../components/Calendario.jsx";
 import api from "../services/api";
 import { useUser } from "../context/UserContext.jsx";
 import { isEmprendedor as empCheck } from "../utils/roles";
-import { format, startOfMonth, endOfMonth, startOfDay, endOfDay } from "date-fns";
+import { format, startOfMonth, endOfMonth, startOfDay, endOfDay, addMinutes, isSameDay } from "date-fns";
 import es from "date-fns/locale/es";
 import {
   listarTurnosOwner,
   crearTurnoOwner,
   borrarTurno,
-  actualizarTurnoOwner,
 } from "../services/turnos";
 
 const cx = (...c) => c.filter(Boolean).join(" ");
 
+/* ===== Helpers ===== */
 function friendly(err) {
   if (typeof err === "string") return err;
   const s = err?.response?.status;
@@ -27,7 +27,6 @@ function friendly(err) {
   if (d?.detail) return typeof d.detail === "string" ? d.detail : "Ocurrió un error.";
   return err?.message || "No disponible por el momento.";
 }
-const toDate = (v) => (v ? new Date(v) : null);
 const iso = (d) => (d instanceof Date ? d.toISOString() : new Date(d).toISOString());
 const toLocalNaive = (date) => {
   const d = new Date(date);
@@ -38,7 +37,7 @@ const toLocalNaive = (date) => {
 };
 const sanitize = (s = "") => s.replace(/[<>]/g, "").trim();
 
-/* ====== Horarios ====== */
+/* ===== Horarios helpers ===== */
 const mapDiaToJS = (dia) => {
   const n = Number(dia);
   if (!Number.isFinite(n)) return null;
@@ -57,7 +56,8 @@ const enabledWeekdaysFrom = (horarios = []) => {
   return set;
 };
 
-/* ====== Mapeo a Calendar ====== */
+/* ===== Map Turno -> Evento calendario ===== */
+const toDate = (v) => (v ? new Date(v) : null);
 function mapTurnoParaCalendario(t, servicios = []) {
   const svc = servicios.find((s) => Number(s.id) === Number(t.servicio_id));
   const start =
@@ -85,11 +85,16 @@ function mapTurnoParaCalendario(t, servicios = []) {
   };
 }
 
-/* ====== Modal (chico, centrado, con validación y fallback de update) ====== */
+/* ============================================================
+ *  MODAL: UI tipo “Reservar” (Día → Servicio → Horario → Confirmar)
+ *  Sólo UX; la lógica de backend se mantiene (onCreate/onUpdate).
+ * ============================================================ */
 function TurnoModal({
   open,
   onClose,
   servicios,
+  horarios,
+  rawTurnos, // para calcular ocupados
   selected,
   onCreate,
   onUpdate,
@@ -98,43 +103,109 @@ function TurnoModal({
 }) {
   const isEdit = !!(selected && selected.id != null);
 
-  const toLocalInput = (d) => {
-    const x = new Date(d || Date.now());
-    x.setSeconds(0, 0);
-    const mins = x.getMinutes();
-    x.setMinutes(mins - (mins % 5));
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}T${pad(x.getHours())}:${pad(x.getMinutes())}`;
-  };
-  const sanitize = (s = "") => s.replace(/[<>]/g, "").trim();
-  const duracionServicioMin = (sid) => {
-    const s = servicios.find((x) => Number(x.id) === Number(sid));
-    return Number(s?.duracion_min ?? s?.duracion_minutos ?? s?.duracion ?? 30) || 30;
-  };
+  // Estado
+  const [fecha, setFecha] = useState(() => (isEdit ? new Date(selected?.start) : null));
+  const [servicioId, setServicioId] = useState(() => (isEdit ? (selected?.servicio_id ?? "") : ""));
+  const [slot, setSlot] = useState(() => (isEdit ? { start: new Date(selected?.start) } : null));
+  const [cliente, setCliente] = useState(() => (isEdit ? (selected?.cliente_nombre || "") : ""));
+  const [notas, setNotas] = useState(() => (isEdit ? (selected?.notas || "") : ""));
+  const [localMsg, setLocalMsg] = useState("");
 
-  const defaultSvcId = isEdit ? selected?.servicio_id ?? "" : servicios?.[0]?.id ?? "";
-  const [servicioId, setServicioId] = useState(defaultSvcId || "");
-  const [dtLocal, setDtLocal] = useState(toLocalInput(isEdit ? selected?.start : new Date()));
-  const [cliente, setCliente] = useState(isEdit ? (selected?.cliente_nombre || "") : "");
-  const [notas, setNotas] = useState(isEdit ? (selected?.notas || "") : "");
+  // Normalizadores
+  const cutHHMM = (t) => String(t || "").slice(0, 5);
+  const normHorario = (h) => ({
+    dia_semana: Number(h?.dia_semana ?? 0),
+    hora_desde: cutHHMM(h?.hora_desde ?? h?.inicio ?? "08:00"),
+    hora_hasta: cutHHMM(h?.hora_hasta ?? h?.fin ?? "18:00"),
+    intervalo_min: Number(h?.intervalo_min ?? 30) || 30,
+    activo: h?.activo !== false,
+  });
 
+  const horariosNorm = useMemo(
+    () => (Array.isArray(horarios) ? horarios.map(normHorario) : []),
+    [horarios]
+  );
+
+  const servicioSel = useMemo(
+    () => (servicios || []).find((s) => String(s.id) === String(servicioId)) || null,
+    [servicioId, servicios]
+  );
+
+  const ocupadosDelDia = useMemo(() => {
+    if (!fecha) return [];
+    return (rawTurnos || [])
+      .map((t) => (t.inicio && t.fin ? { inicio: new Date(t.inicio), fin: new Date(t.fin) } : null))
+      .filter(Boolean)
+      .filter((t) => isSameDay(t.inicio, fecha));
+  }, [fecha, rawTurnos]);
+
+  // Slots calculados según horarios + servicio
+  const slots = useMemo(() => {
+    if (!fecha || !servicioSel) return [];
+    const day = fecha.getDay();
+    const bloques = horariosNorm.filter((h) => h.activo && Number(h.dia_semana) === day);
+    if (bloques.length === 0) return [];
+
+    const dur = Number(servicioSel.duracion_min ?? servicioSel.duracion ?? 30) || 30;
+    const list = [];
+    bloques.forEach((b) => {
+      const [hD, mD] = String(b.hora_desde || "08:00").split(":").map(Number);
+      const [hH, mH] = String(b.hora_hasta || "18:00").split(":").map(Number);
+      const step = Number(b.intervalo_min || 30) || 30;
+
+      const base = new Date(fecha); base.setHours(hD, mD, 0, 0);
+      const blockEnd = new Date(fecha); blockEnd.setHours(hH, mH, 0, 0);
+
+      for (let d = new Date(base); d < blockEnd; d = addMinutes(d, step)) {
+        const end = addMinutes(new Date(d), dur);
+        if (end > blockEnd) continue;
+        const choca = ocupadosDelDia.some((o) => o.inicio < end && o.fin > d);
+        if (!choca) list.push({ start: new Date(d), blockEnd: new Date(blockEnd) });
+      }
+    });
+    return list;
+  }, [fecha, servicioSel, horariosNorm, ocupadosDelDia]);
+
+  // Reset al abrir
   useEffect(() => {
     if (!open) return;
-    const dId = isEdit ? selected?.servicio_id ?? "" : servicios?.[0]?.id ?? "";
-    setServicioId(dId || "");
-    setDtLocal(toLocalInput(isEdit ? selected?.start : selected?.start || new Date()));
-    setCliente(isEdit ? (selected?.cliente_nombre || "") : "");
-    setNotas(isEdit ? (selected?.notas || "") : "");
+    setLocalMsg("");
+    if (isEdit) {
+      setFecha(new Date(selected?.start));
+      setServicioId(selected?.servicio_id ?? "");
+      setSlot({ start: new Date(selected?.start) });
+      setCliente(selected?.cliente_nombre || "");
+      setNotas(selected?.notas || "");
+    } else {
+      setFecha(null);
+      setServicioId("");
+      setSlot(null);
+      setCliente("");
+      setNotas("");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, isEdit, selected?.id, selected?.start]);
+  }, [open, isEdit, selected?.id]);
 
-  const valid = servicioId && dtLocal;
+  // ESC
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose?.();
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "enter") handleSubmit();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, fecha, servicioId, slot, cliente, notas, busy]);
 
-  const handleSubmit = async (e) => {
+  async function handleSubmit(e) {
     e?.preventDefault?.();
-    if (!valid || busy) return;
-    const dur = duracionServicioMin(servicioId);
-    const start = new Date(dtLocal);
+    if (!fecha) return setLocalMsg("Elegí un día.");
+    if (!servicioId) return setLocalMsg("Elegí un servicio.");
+    if (!slot) return setLocalMsg("Elegí un horario disponible.");
+
+    const dur = Number(servicioSel?.duracion_min ?? 30) || 30;
+    const start = new Date(slot.start);
     const end = new Date(start.getTime() + dur * 60000);
     const payload = {
       servicio_id: Number(servicioId),
@@ -145,147 +216,215 @@ function TurnoModal({
     };
     if (isEdit) await onUpdate?.(payload);
     else await onCreate?.(payload);
-  };
-
-  // cerrar con ESC
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e) => { if (e.key === "Escape") onClose?.(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }
 
   if (!open) return null;
 
+  // UI 4 columnas compactas
   return (
     <div
-      className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/50 backdrop-blur-sm px-3"
-      onClick={(e) => { if (e.target === e.currentTarget) onClose?.(); }}
+      className="fixed inset-0 z-[90] grid place-items-center bg-slate-900/60 backdrop-blur-sm px-3"
+      role="dialog"
+      aria-modal="true"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose?.(); }}
     >
-      <div
-        className="w-full max-w-sm rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-2 border-b px-4 py-3">
-          <div>
-            <h3 className="text-base font-semibold text-slate-900">
-              {isEdit ? "Editar turno" : "Nuevo turno"}
-            </h3>
-            {isEdit && (
-              <p className="mt-0.5 text-xs text-slate-500">
-                {selected?.cliente_nombre ? <>Cliente: <b>{selected.cliente_nombre}</b> · </> : null}
-                Servicio: <b>{selected?.servicio || "Servicio"}</b>
-              </p>
-            )}
+      <div className="w-full max-w-5xl overflow-hidden rounded-3xl bg-white shadow-2xl ring-1 ring-slate-200">
+        {/* Header */}
+        <div className="relative bg-gradient-to-r from-blue-700 via-sky-600 to-emerald-500 px-5 py-5 text-white">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 grid place-items-center rounded-xl bg-white/15 ring-1 ring-white/30">
+                <svg viewBox="0 0 24 24" className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <rect x="3" y="4" width="18" height="18" rx="3" />
+                  <path d="M16 2v4M8 2v4M3 10h18" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-xl md:text-2xl font-extrabold tracking-tight">
+                  {isEdit ? "Editar turno" : "Nuevo turno"}
+                </h2>
+                <p className="text-white/90 text-sm">
+                  Elegí <b>día</b>, <b>servicio</b> y <b>horario</b>. Validamos choques y bloques.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy}
+              className="rounded-xl bg-white/10 px-3 py-1.5 text-sm font-semibold ring-1 ring-white/30 hover:bg-white/20 disabled:opacity-60"
+              aria-label="Cerrar"
+              title="Cerrar (Esc)"
+            >
+              Cerrar
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-3 py-1.5 rounded-lg text-sm font-medium border border-slate-300 bg-white hover:bg-slate-50"
-            disabled={busy}
-            aria-label="Cerrar"
-            title="Cerrar"
-          >
-            Cerrar
-          </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-4 space-y-3">
-          <div>
-            <label className="block text-xs font-semibold text-sky-700 mb-1">Servicio</label>
-            <select
-              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
-              value={servicioId}
-              onChange={(e) => setServicioId(e.target.value)}
-              required
-            >
-              <option value="">Elegí un servicio</option>
-              {servicios.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.nombre} ({Number(s.duracion_min ?? s.duracion_minutos ?? 30)} min)
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-semibold text-sky-700 mb-1">Fecha y hora</label>
-            <input
-              type="datetime-local"
-              className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
-              value={dtLocal}
-              onChange={(e) => setDtLocal(e.target.value)}
-              required
-            />
-            <p className="mt-1 text-[11px] text-slate-500">
-              Elegí un horario de atención. El sistema valida choques y rangos.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-sky-700 mb-1">Cliente (opcional)</label>
-              <input
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
-                value={cliente}
-                onChange={(e) => setCliente(sanitize(e.target.value))}
-                placeholder="Cliente X"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-sky-700 mb-1">Notas (opcional)</label>
-              <input
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
-                value={notas}
-                onChange={(e) => setNotas(sanitize(e.target.value))}
-                placeholder="Referencia breve para organizarte"
-                maxLength={220}
-              />
-            </div>
-          </div>
-
+        {/* Mensajes */}
+        <div className="px-5 pt-4">
           {inlineMsg && (
-            <div
-              className={
-                "rounded-xl px-3 py-2 text-sm " +
-                (/(error|No se pudo|403|404|405|409|500|cerró)/i.test(inlineMsg)
-                  ? "bg-red-50 text-red-700 ring-1 ring-red-200"
-                  : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200")
-              }
-            >
+            <div className={cx(
+              "rounded-xl px-3 py-2 text-sm mb-3 ring-1",
+              /(error|No se pudo|403|404|405|409|500|cerró)/i.test(inlineMsg)
+                ? "bg-red-50 text-red-700 ring-red-200"
+                : "bg-emerald-50 text-emerald-700 ring-emerald-200"
+            )}>
               {inlineMsg}
             </div>
           )}
+          {localMsg && (
+            <div className="rounded-xl px-3 py-2 text-sm mb-3 ring-1 bg-sky-50 text-sky-700 ring-sky-200">
+              {localMsg}
+            </div>
+          )}
+        </div>
 
-          <div className="flex items-center justify-end gap-2 pt-1">
-            {isEdit ? (
-              <button
-                type="submit"
-                disabled={!valid || busy}
-                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-60"
-                title="Guardar cambios / Posponer"
-              >
-                Guardar
-              </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={!valid || busy}
-                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-sky-600 text-white hover:bg-sky-700 disabled:opacity-60"
-                title="Crear turno"
-              >
-                Crear
-              </button>
-            )}
+        {/* 4 columnas: Día / Servicio / Horario / Confirmar */}
+        <form onSubmit={handleSubmit} className="px-5 pb-5">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 auto-rows-fr">
+            {/* 1) Día */}
+            <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm flex flex-col">
+              <h3 className="text-sm font-semibold text-slate-900 mb-2">1) Día</h3>
+              <input
+                type="date"
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
+                value={fecha ? format(fecha, "yyyy-MM-dd") : ""}
+                onChange={(e) => {
+                  const [y, m, d] = e.target.value.split("-").map(Number);
+                  const nd = new Date(y, m - 1, d, 0, 0, 0, 0);
+                  setFecha(isNaN(+nd) ? null : nd);
+                  setSlot(null);
+                }}
+              />
+              <p className="mt-2 text-[11px] text-slate-500">
+                Sólo se mostrarán horarios dentro de tus bloques activos.
+              </p>
+            </section>
+
+            {/* 2) Servicio */}
+            <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm flex flex-col">
+              <h3 className="text-sm font-semibold text-slate-900 mb-2">2) Servicio</h3>
+              <div className="grow min-h-0 overflow-auto space-y-2">
+                {(servicios || []).map((s) => {
+                  const sel = String(servicioId) === String(s.id);
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      disabled={!fecha}
+                      onClick={() => { setServicioId(s.id); setSlot(null); }}
+                      className={cx(
+                        "w-full text-left rounded-xl border px-3 py-2 text-sm transition",
+                        !fecha ? "opacity-50 cursor-not-allowed" :
+                        sel ? "border-sky-600 bg-sky-50 text-sky-900" : "border-slate-300 bg-white hover:bg-slate-50"
+                      )}
+                      title={`${s.nombre} · ${Number(s.duracion_min ?? 30)} min`}
+                    >
+                      <div className="font-medium truncate">{s.nombre}</div>
+                      <div className="text-xs text-slate-500">{Number(s.duracion_min ?? 30)} min</div>
+                    </button>
+                  );
+                })}
+                {fecha && servicios?.length === 0 && (
+                  <div className="text-xs text-slate-500">No tenés servicios aún.</div>
+                )}
+              </div>
+            </section>
+
+            {/* 3) Horario */}
+            <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm flex flex-col">
+              <h3 className="text-sm font-semibold text-slate-900 mb-2">3) Horario</h3>
+              <div className="grow min-h-0 overflow-auto">
+                {!fecha ? (
+                  <div className="text-sm text-slate-500">Elegí un día.</div>
+                ) : !servicioId ? (
+                  <div className="text-sm text-slate-500">Elegí un servicio.</div>
+                ) : slots.length === 0 ? (
+                  <div className="text-sm text-slate-500">No hay horarios disponibles.</div>
+                ) : (
+                  <div className="grid grid-cols-2 xl:grid-cols-3 gap-2">
+                    {slots.slice(0, 36).map((s, i) => {
+                      const sel = slot && s.start.getTime() === slot.start.getTime();
+                      return (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => setSlot(s)}
+                          className={cx(
+                            "rounded-xl border px-3 py-2 text-sm font-medium transition",
+                            sel ? "border-sky-600 bg-sky-50 text-sky-900 shadow-sm"
+                                : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
+                          )}
+                          title={`Hasta ${format(s.blockEnd, "HH:mm")}`}
+                        >
+                          {format(s.start, "HH:mm", { locale: es })}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* 4) Confirmar */}
+            <section className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm flex flex-col">
+              <h3 className="text-sm font-semibold text-slate-900 mb-2">4) Confirmar</h3>
+              <div className="grow min-h-0 space-y-2">
+                <p className="text-sm text-slate-600">
+                  {slot
+                    ? <>Turno para <b>{format(slot.start, "EEEE d 'de' MMMM", { locale: es })}</b> a las <b>{format(slot.start, "HH:mm")}</b>.</>
+                    : <>Completá los pasos para confirmar.</>}
+                </p>
+
+                <div>
+                  <label className="block text-xs font-semibold text-sky-700 mb-1">Cliente (opcional)</label>
+                  <input
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
+                    value={cliente}
+                    onChange={(e) => setCliente(sanitize(e.target.value))}
+                    placeholder="Cliente X"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-sky-700 mb-1">Nota (opcional)</label>
+                  <input
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 outline-none focus:ring-2 focus:ring-sky-300"
+                    value={notas}
+                    onChange={(e) => setNotas(sanitize(e.target.value))}
+                    placeholder="Referencia breve"
+                    maxLength={220}
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  disabled={busy}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50 disabled:opacity-60"
+                  title="Cancelar (Esc)"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={!fecha || !servicioId || !slot || busy}
+                  className="rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700 disabled:opacity-60"
+                  title={isEdit ? "Guardar cambios (Ctrl/⌘+Enter)" : "Crear turno (Ctrl/⌘+Enter)"}
+                >
+                  {busy ? (isEdit ? "Guardando…" : "Creando…") : isEdit ? "Guardar" : "Crear"}
+                </button>
+              </div>
+            </section>
           </div>
         </form>
       </div>
     </div>
   );
 }
-
-
 
 /* ====== Página ====== */
 export default function Turnos() {
@@ -304,14 +443,11 @@ export default function Turnos() {
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
 
-  const [ignoreBlocks] = useState(false);
-
   const [rStart, setRStart] = useState(() => {
     const d = new Date();
     const s = startOfMonth(d);
     s.setHours(0, 0, 0, 0);
     return s;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   });
   const [rEnd, setREnd] = useState(() => {
     const d = new Date();
@@ -320,12 +456,11 @@ export default function Turnos() {
     return e;
   });
 
-  // Catálogos
+  // Carga catálogos sólo si es emprendedor
   useEffect(() => {
     (async () => {
       if (!isEmp) {
-        setServicios([]);
-        setHorarios([]);
+        setServicios([]); setHorarios([]);
         return;
       }
       try {
@@ -350,7 +485,7 @@ export default function Turnos() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Remap si cambian servicios
+  // Remap cuando cambian servicios
   useEffect(() => {
     setEventos(rawTurnos.map((t) => mapTurnoParaCalendario(t, servicios)));
   }, [servicios, rawTurnos]);
@@ -370,18 +505,16 @@ export default function Turnos() {
         evs.map((e) => e.raw || { id: e.id, inicio: e.start?.toISOString(), fin: e.end?.toISOString(), servicio_id: e.servicio_id })
       );
       setEventos(evs);
-      // mantener selección si existe ese ID aún
       if (selected?.id) {
         const again = evs.find((x) => x.id === selected.id);
         if (again) setSelected(again);
       }
     } catch (e) {
-      setRawTurnos([]);
-      setEventos([]);
+      setRawTurnos([]); setEventos([]);
       setMsg(friendly(e));
     } finally {
       setLoading(false);
-      setTimeout(() => setMsg(""), 2500);
+      setTimeout(() => setMsg(""), 2400);
     }
   }
 
@@ -411,52 +544,16 @@ export default function Turnos() {
     try {
       setLoading(true);
       setMsg("Guardando cambios…");
-
-      const id = selected.id;
-      let ok = false;
-
-      // 1) PATCH (recomendado)
-      try {
-        await api.patch(`/turnos/${id}`, payload);
-        ok = true;
-      } catch (e1) {
-        // 2) PUT (algunos backends lo usan)
-        try {
-          await api.put(`/turnos/${id}`, payload);
-          ok = true;
-        } catch (e2) {
-          // 3) POST :update (fallback común)
-          try {
-            await api.post(`/turnos/${id}:update`, payload);
-            ok = true;
-          } catch (e3) {
-            // Si las 3 rutas fallan, tiro el error original más claro
-            const s = e3?.response?.status || e2?.response?.status || e1?.response?.status;
-            const d = e3?.response?.data || e2?.response?.data || e1?.response?.data;
-            throw { status: s, data: d };
-          }
-        }
-      }
-
-      if (ok) {
-        setMsg("Turno actualizado.");
-        await fetchTurnosRange(rStart, rEnd);
-        // Mantenemos seleccionado el turno para poder cancelarlo con el botón
-        const again = (await listarTurnosOwner({ desde: iso(rStart), hasta: iso(rEnd) }))
-          .map((t) => mapTurnoParaCalendario(t, servicios))
-          .find((ev) => String(ev.id) === String(id));
-        if (again) setSelected(again);
-        setOpenNew(false);
-      }
+      await api.patch(`/turnos/${selected.id}`, payload).catch(async () => {
+        await api.put(`/turnos/${selected.id}`, payload).catch(async () => {
+          await api.post(`/turnos/${selected.id}:update`, payload);
+        });
+      });
+      setMsg("Turno actualizado.");
+      await fetchTurnosRange(rStart, rEnd);
+      setOpenNew(false);
     } catch (e) {
-      const s = e?.status || e?.response?.status;
-      if (s === 405) {
-        setMsg("No se pudo actualizar: el servidor no permite este método. Probá actualizar a la última versión del backend o habilitar PATCH.");
-      } else if (s === 409) {
-        setMsg("Horario no disponible o fuera de rango.");
-      } else {
-        setMsg("No se pudo guardar. Revisá el horario y probá de nuevo.");
-      }
+      setMsg(friendly(e));
     } finally {
       setLoading(false);
       setTimeout(() => setMsg(""), 3000);
@@ -477,7 +574,7 @@ export default function Turnos() {
       setMsg(friendly(e));
     } finally {
       setLoading(false);
-      setTimeout(() => setMsg(""), 2600);
+      setTimeout(() => setMsg(""), 2500);
     }
   };
 
@@ -502,16 +599,12 @@ export default function Turnos() {
     setOpenNew(true);
   };
 
-  // ⬇️ FIX: al seleccionar un slot, abrir modal con la fecha/hora elegida (sin id => alta)
   const onSelectSlot = (slot) => {
-    if (!slot?.start) {
-      setOpenNew(true);
-      return;
-    }
+    if (!slot?.start) { setOpenNew(true); return; }
     setSelected({
       id: null,
       start: slot.start,
-      end: slot.end || new Date(new Date(slot.start).getTime() + 30 * 60000), // fallback 30'
+      end: slot.end || new Date(new Date(slot.start).getTime() + 30 * 60000),
       cliente_nombre: "",
       servicio: "",
       servicio_id: "",
@@ -520,7 +613,7 @@ export default function Turnos() {
     setOpenNew(true);
   };
 
-  // ==== Render
+  // ==== Render no-emprendedor: sólo info + link a reservar
   if (!isEmp) {
     return (
       <div className="space-y-4">
@@ -552,9 +645,10 @@ export default function Turnos() {
     );
   }
 
+  // ==== Render emprendedor
   return (
     <div className="space-y-4">
-      {/* Header */}
+      {/* Encabezado */}
       <div className="-mx-4 lg:-mx-6 overflow-x-clip">
         <div className="rounded-3xl bg-gradient-to-r from-blue-600 to-cyan-400 p-5 md:p-6 text-white shadow">
           <div className="mx-auto max-w-7xl px-4 lg:px-6">
@@ -597,16 +691,13 @@ export default function Turnos() {
         </div>
       </div>
 
-      {/* Grid */}
+      {/* Grid principal: calendario + panel derecho */}
       <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4 items-start">
         <div className="min-w-0">
           <div className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm">
             <Calendario
               turnos={eventos}
-              onSelectEvent={(e) => {
-                setSelected(e);
-                setOpenNew(true);
-              }}
+              onSelectEvent={onSelectEvent}
               onSelectSlot={onSelectSlot}
               defaultView="month"
               height={760}
@@ -617,6 +708,7 @@ export default function Turnos() {
         </div>
 
         <aside className="space-y-4 w-full xl:w-[340px] self-start xl:top-[96px] xl:sticky">
+          {/* KPIs */}
           <div className="grid grid-cols-3 gap-3">
             <div className="rounded-xl border border-slate-200 bg-white p-3 text-center">
               <div className="text-xs text-slate-500">Servicios</div>
@@ -639,17 +731,18 @@ export default function Turnos() {
             </div>
           </div>
 
+          {/* Acciones CRUD */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 font-medium text-slate-700">Acciones de turnos</div>
             <ul className="mb-3 text-xs text-slate-600 space-y-1.5">
-              <li>• <b>Agregar</b>: botón “+ Agregar turno” o clic en una fecha.</li>
-              <li>• <b>Editar / Posponer</b>: clic en un turno → “Guardar”.</li>
+              <li>• <b>Agregar</b>: “+ Agregar turno” o clic en una fecha.</li>
+              <li>• <b>Editar / Posponer</b>: clic en un evento → “Guardar”.</li>
               <li>• <b>Cancelar</b>: seleccioná un turno y tocá “Cancelar”.</li>
             </ul>
 
             <div className="grid grid-cols-1 gap-2">
               <button
-                onClick={() => setOpenNew(true)}
+                onClick={() => { setSelected(null); setOpenNew(true); }}
                 className="w-full rounded-xl bg-sky-600 px-3 py-2.5 text-sm font-semibold text-white shadow hover:bg-sky-700"
               >
                 + Agregar turno
@@ -669,7 +762,7 @@ export default function Turnos() {
 
               <button
                 disabled={!selected}
-                onClick={async () => await eliminarTurno()}
+                onClick={eliminarTurno}
                 className={cx(
                   "w-full rounded-xl px-3 py-2.5 text-sm font-semibold transition shadow",
                   "bg-gradient-to-r from-rose-600 to-red-500 text-white",
@@ -693,18 +786,19 @@ export default function Turnos() {
 
             {msg && (
               <div
-                className={`mt-3 rounded-xl px-3 py-2 text-sm ${
-                  /cerró|error|No se pudo|403|404|405|409|500/i.test(msg)
-                    ? "bg-red-50 text-red-700 ring-1 ring-red-200"
-                    : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
-                }`}
+                className={cx(
+                  "mt-3 rounded-xl px-3 py-2 text-sm ring-1",
+                  /(cerró|error|No se pudo|403|404|405|409|500)/i.test(msg)
+                    ? "bg-red-50 text-red-700 ring-red-200"
+                    : "bg-emerald-50 text-emerald-700 ring-emerald-200"
+                )}
               >
                 {msg}
               </div>
             )}
           </div>
 
-          {/* Agenda compacta */}
+          {/* Agenda de hoy */}
           <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 font-medium text-slate-700">
               Agenda de hoy · {format(new Date(), "EEEE d 'de' MMMM", { locale: es })}
@@ -767,19 +861,18 @@ export default function Turnos() {
         </aside>
       </div>
 
-      {/* Modal */}
+      {/* Modal Crear/Editar */}
       <TurnoModal
         open={openNew}
-        onClose={() => {
-          setOpenNew(false); // NO limpiamos 'selected' para que puedas cancelar luego
-        }}
+        onClose={() => { setOpenNew(false); }}
         servicios={servicios}
+        horarios={horarios}
+        rawTurnos={rawTurnos}
         selected={selected}
         onCreate={crearTurno}
         onUpdate={editarTurno}
         inlineMsg={msg}
         busy={loading}
-        horarios={horarios}
       />
     </div>
   );

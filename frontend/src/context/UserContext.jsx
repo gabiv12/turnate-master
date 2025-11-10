@@ -1,90 +1,83 @@
 // src/context/UserContext.jsx
-import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
-import api, { getAuthToken, clearSession, setSession } from "../services/api";
-import * as UserSvc from "../services/usuarios";
+import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import api, { getAuthToken, setSession as lsSetSession, clearAuthToken, getUser as lsGetUser, setUser as lsSetUser } from "../services/api";
+import { me as meSvc } from "../services/usuarios";
 
 const Ctx = createContext(null);
 
 export function UserProvider({ children }) {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(() => lsGetUser() || null);
   const [isLoadingUser, setIsLoadingUser] = useState(true);
 
-  // evita loops si el back responde 401 repetido
-  const lastAuthFailAt = useRef(0);
+  const isAuth = !!getAuthToken();
 
-  const isAuthenticated = !!getAuthToken();
+  // ---- helpers de sesión (compat con el resto del proyecto) ----
+  const setSession = (token, nextUser) => {
+    // persiste en LS con los helpers de api.js
+    lsSetSession(token || null, nextUser || null);
+    setUser(nextUser || null);
+  };
 
-  const logout = React.useCallback(() => {
-    try { clearSession(); } catch {}
+  const logout = () => {
+    try { clearAuthToken(); } catch {}
+    // limpiamos usuario en LS para evitar flashes
+    lsSetUser(null);
     setUser(null);
-    setIsLoadingUser(false);
-    if (window.location.pathname !== "/login") {
-      window.location.assign("/login");
-    }
-  }, []);
+    // redirigimos sin depender de react-router (es global y confiable)
+    window.location.assign("/login");
+  };
 
-  const refreshUser = React.useCallback(async () => {
-    // si no hay token, no pegamos /me
-    if (!getAuthToken()) {
-      setUser(null);
-      setIsLoadingUser(false);
-      return null;
-    }
+  // ---- carga inicial: me() una sola vez ----
+  const refreshUser = async () => {
     try {
-      setIsLoadingUser(true);
-      const data = await UserSvc.me();
-      setUser(data || null);
-      return data || null;
+      const data = await meSvc(); // GET /usuarios/me
+      // me() devuelve el usuario normalizado
+      if (data && typeof data === "object") {
+        lsSetUser(data);
+        setUser(data);
+      }
+      return data;
     } catch (e) {
-      // si 401, limpiar sesión una sola vez por ventana de 3s
-      const st = e?.response?.status;
-      if (st === 401) {
-        const now = Date.now();
-        if (now - lastAuthFailAt.current > 3000) {
-          lastAuthFailAt.current = now;
-          logout();
-        } else {
-          setUser(null);
-          setIsLoadingUser(false);
-        }
-      } else {
-        // otros errores: no tumbamos la sesión, pero dejamos el estado usable
-        setIsLoadingUser(false);
+      // si hay 401, limpiamos estado pero NO rompemos la app
+      if (e?.response?.status === 401) {
+        try { clearAuthToken(); } catch {}
+        lsSetUser(null);
+        setUser(null);
       }
       return null;
-    } finally {
-      setIsLoadingUser(false);
     }
-  }, [logout]);
+  };
 
-  // hidratación inicial: SOLO si hay token
   useEffect(() => {
     let mounted = true;
     (async () => {
-      if (!mounted) return;
-      if (!getAuthToken()) { setIsLoadingUser(false); return; }
-      await refreshUser();
+      setIsLoadingUser(true);
+      try {
+        // si hay token, intentamos validar; si no, solo dejamos isLoadingUser=false
+        if (getAuthToken()) {
+          await refreshUser();
+        } else {
+          // mantener cualquier user residual limpio
+          lsSetUser(null);
+          setUser(null);
+        }
+      } finally {
+        if (mounted) setIsLoadingUser(false);
+      }
     })();
     return () => { mounted = false; };
-  }, [refreshUser]);
-
-  const isEmprendedor = useMemo(() => {
-    if (!user) return false;
-    const roles = new Set();
-    if (Array.isArray(user?.roles)) user.roles.forEach(r => roles.add(String(r).toLowerCase()));
-    if (user?.rol) roles.add(String(user.rol).toLowerCase());
-    return roles.has("emprendedor");
-  }, [user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const value = useMemo(() => ({
     user,
-    setUser,
-    isAuthenticated,
+    isAuth: !!getAuthToken(),
     isLoadingUser,
-    isEmprendedor,
+    // compat con el resto de páginas
+    setSession,
     refreshUser,
     logout,
-  }), [user, isAuthenticated, isLoadingUser, isEmprendedor, refreshUser, logout]);
+  }), [user, isLoadingUser]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

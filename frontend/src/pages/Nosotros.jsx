@@ -108,7 +108,7 @@ export default function Nosotros() {
           <div className="min-h-[46dvh] sm:min-h-[52dvh] grid place-items-center py-10 sm:py-14">
             <div className="max-w-3xl rounded-2xl bg-slate-900/25 backdrop-blur-[1px] ring-1 ring-white/10 p-6 sm:p-7 md:p-8">
               <span className="inline-flex items-center gap-2 rounded-full bg-white/10 text-white px-3 py-1 text-xs font-semibold ring-1 ring-white/20">
-                <Icon.Pain className="h-4 w-4" /> La necesidad
+                <Icon.Pain className="h-4 w-4" /> Gestión inteligente de turnos
               </span>
               <h1 id="hero-title" className="mt-3 text-4xl sm:text-5xl font-bold tracking-tight text-white">
                 Evitar turnos solapados y mensajes eternos

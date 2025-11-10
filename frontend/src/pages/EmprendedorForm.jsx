@@ -450,7 +450,7 @@ export default function EmprendedorForm() {
                   onChange={onChange}
                   rows={3}
                   className={BOX}
-                  placeholder="Ej.: Útiles escolares y de oficina. Impresiones y fotocopias."
+                  placeholder="Ej.: Emprendimiento dedicado a mejorar la gestión de turnos."
                 />
               </div>
 

@@ -1,160 +1,176 @@
 // src/services/api.js
+// ===========================================================
+// Única fuente de verdad para:
+// - Base URL (VITE_API_URL)
+// - Token & Usuario (localStorage)
+// - Interceptores (Authorization + manejo 401 global)
+// - Helpers: errorMessage, setSession/clearSession
+// - Atajos HTTP y endpoints básicos (login, register, me)
+// - apiListEmprendedores, apiListRubros, apiGetEmprendedorByCodigo
+// ===========================================================
+
 import axios from "axios";
 
-/* ========= Constantes de Storage ========= */
-export const TOKEN_KEY = "accessToken";
-export const USER_KEY  = "user";
+// ---------- Config base ----------
+const API_URL = (import.meta?.env?.VITE_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 
-/* ========= Token helpers ========= */
-export function setAuthToken(token) {
-  try { token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY); } catch {}
-}
+// ---------- Storage Keys ----------
+const LS_TOKEN_KEY = "auth_token";
+const LS_USER_KEY  = "user";
+
+// ---------- Token helpers ----------
 export function getAuthToken() {
-  try { return localStorage.getItem(TOKEN_KEY) || null; } catch { return null; }
+  try { return localStorage.getItem(LS_TOKEN_KEY) || ""; } catch { return ""; }
+}
+export function setAuthToken(token) {
+  try { token ? localStorage.setItem(LS_TOKEN_KEY, token) : localStorage.removeItem(LS_TOKEN_KEY); } catch {}
 }
 export function clearAuthToken() {
-  try { localStorage.removeItem(TOKEN_KEY); } catch {}
+  try { localStorage.removeItem(LS_TOKEN_KEY); } catch {}
 }
 
-/* ========= User helpers ========= */
-export function setUser(user) {
-  try { user ? localStorage.setItem(USER_KEY, JSON.stringify(user)) : localStorage.removeItem(USER_KEY); } catch {}
-}
+// ---------- User helpers ----------
 export function getUser() {
   try {
-    const raw = localStorage.getItem(USER_KEY);
+    const raw = localStorage.getItem(LS_USER_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch { return null; }
 }
+export function setUser(u) {
+  try { u ? localStorage.setItem(LS_USER_KEY, JSON.stringify(u)) : localStorage.removeItem(LS_USER_KEY); } catch {}
+}
 export function clearUser() {
-  try { localStorage.removeItem(USER_KEY); } catch {}
+  try { localStorage.removeItem(LS_USER_KEY); } catch {}
 }
 
-/* ========= Sesión helpers ========= */
-export function setSession(arg1, arg2) {
-  const currentToken = getAuthToken();
-  const currentUser  = getUser();
-
-  let token, user;
-  if (typeof arg1 === "object" && arg1 !== null && arg2 === undefined) {
-    token = (arg1.token === undefined) ? currentToken : arg1.token;
-    user  = (arg1.user  === undefined) ? currentUser  : arg1.user;
-  } else {
-    token = (arg1 === undefined) ? currentToken : arg1;
-    user  = (arg2 === undefined) ? currentUser  : arg2;
-  }
-
-  if (token === null) clearAuthToken(); else setAuthToken(token);
-  if (user  === null) clearUser();      else setUser(user);
+// ---------- Sesión atómica ----------
+export function setSession(token, userObj) {
+  setAuthToken(token);
+  setUser(userObj);
 }
-export function getSession() { return { token: getAuthToken(), user: getUser() }; }
-export function clearSession() { clearAuthToken(); clearUser(); }
+export function clearSession() {
+  clearAuthToken();
+  clearUser();
+}
 
-/* ========= Mensajes de error amigables ========= */
+// ---------- Mensaje amigable de error ----------
 export function errorMessage(err) {
-  const st = err?.response?.status;
-  if (st === 401) return "Sesión vencida o no autorizada.";
-  if (st === 403) return "Sin permisos para esta acción.";
-  if (st === 404) return "No encontrado.";
-  if (st === 409) return "Conflicto de datos.";
-  if (st >= 500)  return "Error del servidor.";
-  return err?._friendly || err?.message || "Error de red.";
-}
+  if (!err) return "Ocurrió un error.";
+  if (typeof err === "string") return err;
 
-/* ========= Adaptador /horarios/mis (si lo usás) ========= */
-function hhmm(v) {
-  if (!v) return "09:00";
-  const [h = "09", m = "00"] = String(v).split(":");
-  return `${h.padStart(2, "0")}:${m.padStart(2, "0")}`;
-}
-function normDia(x) {
-  const n = Number(x);
-  if (!Number.isFinite(n)) return 0;
-  if (n >= 0 && n <= 6) return n;
-  if (n >= 1 && n <= 7) return n % 7;
-  return 0;
-}
-function toFlatHorariosPayload(body) {
-  if (!body) return [];
-  const list = (x) => (Array.isArray(x) ? x : (x ? [x] : []));
-  const dias = list(body?.dias ?? body?.dia ?? []);
-  const bloques = list(body?.bloques ?? body?.items ?? []);
-  const intervalo = Number(body?.intervalo_min ?? body?.intervalo ?? 30);
+  const s = err?.response?.status;
+  const d = err?.response?.data;
 
-  const flat = [];
-  for (const d of dias) {
-    const dia = normDia(d);
-    for (const b of bloques) {
-      flat.push({
-        dia,
-        desde: hhmm(b?.desde ?? b?.inicio ?? b?.start),
-        hasta: hhmm(b?.hasta ?? b?.fin ?? b?.end),
-        intervalo_min: intervalo,
-      });
-    }
+  if (s === 401) return "Tu sesión se cerró. Iniciá sesión nuevamente.";
+  if (s === 403) return "No tenés permisos para esta acción.";
+  if (s === 404) return typeof d === "string" ? d : (d?.detail || "No encontrado.");
+  if (s === 409) {
+    if (typeof d === "string") return d;
+    if (d?.detail) return typeof d.detail === "string" ? d.detail : "Conflicto en los datos.";
+    return "Conflicto.";
   }
-  return flat;
+  if (typeof d === "string") return d;
+  if (d?.detail) return typeof d.detail === "string" ? d.detail : "Ocurrió un error.";
+  return err?.message || "No disponible por el momento.";
 }
 
-/* ========= Axios base ========= */
-const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || "http://127.0.0.1:8000",
-  withCredentials: false,
-  timeout: 30000,
-});
+// ---------- Axios instance ----------
+const api = axios.create({ baseURL: API_URL });
 
-/* ========= Request interceptor ========= */
-api.interceptors.request.use((config) => {
-  const token = getAuthToken();
-  if (token) {
-    config.headers = config.headers || {};
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-
-  // Adaptador para /horarios/mis (opcional)
-  const method = String(config.method || "get").toLowerCase();
-  const url = String(config.url || "");
-  if (method === "post" && url.endsWith("/horarios/mis")) {
-    try {
-      const flat = toFlatHorariosPayload(config.data);
-      config.data = flat;
+// ---------- Interceptor: Request (agrega Authorization) ----------
+api.interceptors.request.use(
+  (config) => {
+    const t = getAuthToken();
+    if (t) {
       config.headers = config.headers || {};
-      config.headers["Content-Type"] = "application/json";
-    } catch {}
-  }
+      config.headers.Authorization = `Bearer ${t}`;
+    }
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
 
-  return config;
-});
-
-/* ========= Response interceptor ========= */
+// ---------- Interceptor: Response (401 => limpiar y mandar a /login) ----------
+let handling401 = false;
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    err._friendly = errorMessage(err);
-    const st = err?.response?.status;
-    const reqUrl = (err?.config?.url || "").toString();
-
-    // ⛔ No limpies ni redirijas si el 401 es del propio endpoint de LOGIN
-    const isLoginCall = /\/usuarios\/login\b/.test(reqUrl);
-
-    if (st === 401 && !isLoginCall) {
+    const status = err?.response?.status;
+    if (status === 401 && !handling401) {
+      handling401 = true;
       try { clearSession(); } catch {}
-      if (window.location.pathname !== "/login") {
-        window.location.assign("/login");
+      // Evitar loop si justo es login/registro
+      const url = err?.config?.url || "";
+      const safe = ["/usuarios/login", "/usuarios/registro", "/usuarios/registrar"];
+      const onAuthEndpoint = safe.some((p) => url.includes(p));
+      if (!onAuthEndpoint) {
+        try { window.location.assign("/login"); } catch {}
       }
+      handling401 = false;
+      return Promise.reject("Tu sesión se cerró. Iniciá sesión nuevamente.");
     }
     return Promise.reject(err);
   }
 );
 
-export async function apiListEmprendedores(params = {}) {
-  const { q, rubro, limit = 50, offset = 0 } = params;
-  const res = await api.get("/emprendedores/", { params: { q, rubro, limit, offset } });
-  return res.data || [];
-}
-export async function apiListRubros() {
-  const res = await api.get("/emprendedores/rubros");
-  return res.data || [];
+// ---------- Atajos HTTP ----------
+export async function apiGet(path, params)  { const r = await api.get(path, { params }); return r?.data; }
+export async function apiPost(path, data, config = {}) { const r = await api.post(path, data, config); return r?.data; }
+export async function apiPut(path, data)   { const r = await api.put(path, data);  return r?.data; }
+export async function apiPatch(path, data) { const r = await api.patch(path, data); return r?.data; }
+export async function apiDelete(path)      { const r = await api.delete(path); return r?.data; }
+
+// ---------- Endpoints base ----------
+/** /usuarios/me -> actualiza LS user y devuelve objeto usuario */
+export async function me() {
+  const r = await api.get("/usuarios/me");
+  const user = r?.data || null;
+  if (user) setUser(user);
+  return user;
 }
 
+/** /usuarios/login {email, password} -> { token, user } (compat con varios backends) */
+export async function login(credentials) {
+  const r = await api.post("/usuarios/login", credentials);
+  const data = r?.data || {};
+  const token = data.token || data?.access_token || data?.Token || "";
+  const user  = data.user_schema || data.user || data?.usuario || null;
+  if (token) setAuthToken(token);
+  if (user)  setUser(user);
+  return { token, user };
+}
+
+/** Registro (compat) usa /usuarios/registro y fallback a /usuarios/registrar */
+export async function register(payload) {
+  try {
+    const r = await api.post("/usuarios/registro", payload);
+    return r?.data;
+  } catch (e1) {
+    const r2 = await api.post("/usuarios/registrar", payload);
+    return r2?.data;
+  }
+}
+
+/** Lista de rubros (para IngresarCódigo / filtros de emprendedores) */
+export async function apiListRubros() {
+  const r = await api.get("/emprendedores/rubros");
+  // normalizamos a array simple
+  const items = Array.isArray(r?.data?.items) ? r.data.items : Array.isArray(r?.data) ? r.data : [];
+  return items;
+}
+
+/** Lista de emprendedores (con filtros opcionales {q, rubro, limit, offset}) */
+export async function apiListEmprendedores(params = {}) {
+  const r = await api.get("/emprendedores/", { params });
+  return r?.data;
+}
+
+/** Obtener un emprendedor por código público */
+export async function apiGetEmprendedorByCodigo(codigo) {
+  if (!codigo) return null;
+  const r = await api.get(`/emprendedores/by-codigo/${encodeURIComponent(codigo)}`);
+  return r?.data || null;
+}
+
+// ---------- Export default ----------
 export default api;

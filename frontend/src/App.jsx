@@ -20,7 +20,7 @@ import Reservar from "./pages/Reservar.jsx";
 import Perfil from "./pages/Perfil.jsx";
 import Turnos from "./pages/Turnos.jsx";
 import Estadisticas from "./pages/Estadisticas.jsx";
-// 👉 Eliminado: import Suscripcion from "./pages/Suscripcion.jsx";
+// import Suscripcion from "./pages/Suscripcion.jsx"; // eliminado si ya no se usa
 import EmprendedorForm from "./pages/EmprendedorForm.jsx";
 import Servicios from "./pages/Servicios.jsx";
 import Horarios from "./pages/Horarios.jsx";
@@ -42,25 +42,26 @@ export default function App() {
 
       {/* Panel (protegido) */}
       <Route element={<PanelShell />}>
+        {/* Cualquier usuario logueado */}
         <Route element={<ProtectedRoute />}>
           <Route path="/reservar" element={<IngresarCodigo />} />
           <Route path="/reservar/:codigo" element={<Reservar />} />
           <Route path="/perfil" element={<Perfil />} />
           <Route path="/update-user" element={<Navigate to="/perfil" replace />} />
           <Route path="/estadisticas" element={<Estadisticas />} />
-
-          {/* 👉 Eliminado Suscripcion y agregado redirect legacy */}
-          <Route path="/suscripcion" element={<Navigate to="/emprendimiento" replace />} />
-
+          {/* <Route path="/suscripcion" element={<Suscripcion />} /> */}
+          {/* Emprendimiento accesible para que el usuario active su plan con el modal */}
           <Route path="/emprendimiento" element={<EmprendedorForm />} />
-          <Route path="/turnos" element={<Turnos />} />
         </Route>
 
+        {/* Solo emprendedor */}
         <Route element={<ProtectedRoute requireRole="emprendedor" />}>
           <Route path="/servicios" element={<Servicios />} />
           <Route path="/horarios" element={<Horarios />} />
+          <Route path="/turnos" element={<Turnos />} /> {/* <- MOVIDO AQUÍ */}
         </Route>
 
+        {/* Solo admin */}
         <Route element={<ProtectedRoute requireRole="admin" />}>
           <Route path="/admin" element={<AdminReportes />} />
         </Route>
