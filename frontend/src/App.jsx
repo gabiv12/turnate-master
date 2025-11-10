@@ -20,7 +20,7 @@ import Reservar from "./pages/Reservar.jsx";
 import Perfil from "./pages/Perfil.jsx";
 import Turnos from "./pages/Turnos.jsx";
 import Estadisticas from "./pages/Estadisticas.jsx";
-import Suscripcion from "./pages/Suscripcion.jsx";
+// 👉 Eliminado: import Suscripcion from "./pages/Suscripcion.jsx";
 import EmprendedorForm from "./pages/EmprendedorForm.jsx";
 import Servicios from "./pages/Servicios.jsx";
 import Horarios from "./pages/Horarios.jsx";
@@ -48,7 +48,10 @@ export default function App() {
           <Route path="/perfil" element={<Perfil />} />
           <Route path="/update-user" element={<Navigate to="/perfil" replace />} />
           <Route path="/estadisticas" element={<Estadisticas />} />
-          <Route path="/suscripcion" element={<Suscripcion />} />
+
+          {/* 👉 Eliminado Suscripcion y agregado redirect legacy */}
+          <Route path="/suscripcion" element={<Navigate to="/emprendimiento" replace />} />
+
           <Route path="/emprendimiento" element={<EmprendedorForm />} />
           <Route path="/turnos" element={<Turnos />} />
         </Route>

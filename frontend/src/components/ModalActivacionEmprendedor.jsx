@@ -1,7 +1,39 @@
 // src/components/ModalActivacionEmprendedor.jsx
 import React, { useEffect, useState } from "react";
 import { activarEmprendedor, me } from "../services/usuarios.js";
-import { miEmprendedor } from "../services/emprendedores.js";
+// Usamos namespace para evitar problemas de import nombrado
+import * as EmpSvc from "../services/emprendedores.js";
+
+/** Mensaje amigable sin depender de services/api.js */
+function friendlyError(err) {
+  const st = err?.response?.status;
+  if (st === 401) return "Sesión vencida o no autorizada.";
+  if (st === 403) return "Sin permisos para esta acción.";
+  if (st === 404) return "No encontrado.";
+  if (st === 409) return "Conflicto de datos.";
+  if (st >= 500)  return "Error del servidor.";
+  return err?._friendly || err?.message || "Ocurrió un error.";
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/** Reintenta obtener /emprendedores/mi por si el ensure del back tarda en reflejarse */
+async function getEmprendedorWithRetries({ tries = 3, delayMs = 250 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    try {
+      const emp = await EmpSvc.miEmprendedor();
+      return emp || null;
+    } catch (e) {
+      const st = e?.response?.status;
+      if (st === 404) {
+        if (i < tries - 1) await sleep(delayMs);
+        continue;
+      }
+      throw e; // otros errores suben
+    }
+  }
+  return null;
+}
 
 export default function ModalActivacionEmprendedor({ open, onClose, userId, onActivated }) {
   const [loading, setLoading] = useState(false);
@@ -16,61 +48,25 @@ export default function ModalActivacionEmprendedor({ open, onClose, userId, onAc
 
   if (!open) return null;
 
-  async function tryActivateWithRetries(uid) {
-    // 1) Intento normal
-    try {
-      console.info("[MODAL] activar -> intento 1");
-      await activarEmprendedor(uid);
-      return true;
-    } catch (e1) {
-      const s1 = e1?.response?.status ?? e1?._info?.status;
-      console.warn("[MODAL] activar intento 1 fallo", s1);
-      // 2) Si 401, refresco /me y reintento
-      if (s1 === 401) {
-        try {
-          console.info("[MODAL] refresh /usuarios/me y reintento");
-          await me(); // revalida sesión y actualiza user en LS
-        } catch {}
-        try {
-          console.info("[MODAL] activar -> intento 2");
-          await activarEmprendedor(uid);
-          return true;
-        } catch (e2) {
-          const s2 = e2?.response?.status ?? e2?._info?.status;
-          console.warn("[MODAL] activar intento 2 fallo", s2);
-          throw e2;
-        }
-      }
-      throw e1;
-    }
-  }
-
   const activar = async () => {
     if (!userId) { setErr("Tenés que iniciar sesión primero."); return; }
     setLoading(true); setMsg(""); setErr("");
+
     try {
-      // Activa el plan con reintentos controlados (maneja 401 internamente)
-      await tryActivateWithRetries(userId);
+      // 1) activar (el back puede devolver token nuevo y/o habilitar el modo)
+      await activarEmprendedor(userId);
 
-      // Trae el emprendedor resultante (GET /emprendedores/mi con fallback interno)
-      let emp = null;
-      try {
-        emp = await miEmprendedor();
-      } catch {}
+      // 2) refrescar el usuario (por si cambió el rol/flags)
+      try { await me(); } catch {}
 
-      // Avisá al padre
+      // 3) obtener/confirmar el emprendedor (con reintentos por consistencia eventual)
+      const emp = await getEmprendedorWithRetries({ tries: 3, delayMs: 250 });
+
+      // 4) notificar al padre y mostrar feedback
       onActivated?.({ emprendedor: emp || null });
-
       setMsg("¡Listo! Ya podés cargar servicios y horarios.");
-      // Opcional: cerrar al confirmar; como no tocamos UI, dejamos que el padre cierre si corresponde
-      // onClose?.();
     } catch (e) {
-      const st = e?.response?.status ?? e?._info?.status;
-      setErr(st === 401
-        ? "Sesión inválida o vencida. Iniciá sesión e intentá de nuevo."
-        : st === 403
-        ? "No autorizado."
-        : "No se pudo activar. Probá de nuevo.");
+      setErr(friendlyError(e));
     } finally {
       setLoading(false);
     }

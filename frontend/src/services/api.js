@@ -32,49 +32,36 @@ export function clearUser() {
 
 /* ========= Sesión helpers ========= */
 export function setSession(arg1, arg2) {
+  const currentToken = getAuthToken();
+  const currentUser  = getUser();
+
   let token, user;
   if (typeof arg1 === "object" && arg1 !== null && arg2 === undefined) {
-    token = arg1.token;
-    user  = arg1.user;
+    token = (arg1.token === undefined) ? currentToken : arg1.token;
+    user  = (arg1.user  === undefined) ? currentUser  : arg1.user;
   } else {
-    token = arg1;
-    user  = arg2;
+    token = (arg1 === undefined) ? currentToken : arg1;
+    user  = (arg2 === undefined) ? currentUser  : arg2;
   }
-  if (token) setAuthToken(token); else clearAuthToken();
-  if (user)  setUser(user); else clearUser();
-}
-export function getSession() {
-  return { token: getAuthToken(), user: getUser() };
-}
-export function clearSession() {
-  clearAuthToken(); clearUser();
-}
 
-/* ========= Normalizador de errores (a string) ========= */
+  if (token === null) clearAuthToken(); else setAuthToken(token);
+  if (user  === null) clearUser();      else setUser(user);
+}
+export function getSession() { return { token: getAuthToken(), user: getUser() }; }
+export function clearSession() { clearAuthToken(); clearUser(); }
+
+/* ========= Mensajes de error amigables ========= */
 export function errorMessage(err) {
-  // Si ya es string, devolver tal cual
-  if (typeof err === "string") return err;
-
-  const res = err?.response;
-  if (res) {
-    const data = res.data;
-    if (data?.detail) {
-      if (Array.isArray(data.detail)) {
-        const first = data.detail[0];
-        if (first?.msg) return String(first.msg);
-        try { return JSON.stringify(first); } catch {}
-      }
-      if (typeof data.detail === "string") return data.detail;
-    }
-    if (typeof data === "string") return data;
-    return `[API][${res.status}] ${res.config?.url || ""}`.trim();
-  }
-  if (err?.message) return err.message;
-  try { return JSON.stringify(err); } catch {}
-  return "Error inesperado";
+  const st = err?.response?.status;
+  if (st === 401) return "Sesión vencida o no autorizada.";
+  if (st === 403) return "Sin permisos para esta acción.";
+  if (st === 404) return "No encontrado.";
+  if (st === 409) return "Conflicto de datos.";
+  if (st >= 500)  return "Error del servidor.";
+  return err?._friendly || err?.message || "Error de red.";
 }
 
-/* ========= Utilidades para horarios (transformación) ========= */
+/* ========= Adaptador /horarios/mis (si lo usás) ========= */
 function hhmm(v) {
   if (!v) return "09:00";
   const [h = "09", m = "00"] = String(v).split(":");
@@ -87,52 +74,21 @@ function normDia(x) {
   if (n >= 1 && n <= 7) return n % 7;
   return 0;
 }
-/**
- * Plano esperado por el back (este router): 
- * [ { dia_semana, desde, hasta, intervalo_min } ... ]
- * Esta función toma agrupado o plano y lo devuelve plano.
- */
 function toFlatHorariosPayload(body) {
   if (!body) return [];
+  const list = (x) => (Array.isArray(x) ? x : (x ? [x] : []));
+  const dias = list(body?.dias ?? body?.dia ?? []);
+  const bloques = list(body?.bloques ?? body?.items ?? []);
+  const intervalo = Number(body?.intervalo_min ?? body?.intervalo ?? 30);
 
-  const list = (x) => (Array.isArray(x) ? x : []);
-  let items = [];
-
-  if (typeof body === "object" && !Array.isArray(body) && Array.isArray(body.items)) {
-    items = body.items;
-  } else if (typeof body === "object" && !Array.isArray(body) && Array.isArray(body.bloques)) {
-    items = body.bloques;
-  } else if (Array.isArray(body)) {
-    items = body;
-  } else {
-    return [];
-  }
-
-  // Si ya es plano
-  if (items.length && items[0] && typeof items[0] === "object" && !("bloques" in items[0]) && "desde" in items[0]) {
-    return items.map((r) => ({
-      dia_semana: normDia(r.dia_semana ?? r.dia ?? r.weekday ?? 0),
-      dia: normDia(r.dia ?? r.dia_semana ?? r.weekday ?? 0), // compat
-      desde: hhmm(r.desde),
-      hasta: hhmm(r.hasta),
-      intervalo_min: Number(r.intervalo_min ?? r.intervalo ?? 30),
-    }));
-  }
-
-  // Agrupado -> plano
   const flat = [];
-  for (const it of items) {
-    if (!it || typeof it !== "object") continue;
-    const dia = normDia(it.dia_semana ?? it.dia ?? it.weekday ?? 0);
-    const intervalo = Number(it.intervalo_min ?? it.intervalo ?? 30);
-    const activo = it.activo !== false;
-    if (!activo) continue;
-    for (const b of list(it.bloques)) {
+  for (const d of dias) {
+    const dia = normDia(d);
+    for (const b of bloques) {
       flat.push({
-        dia_semana: dia,
-        dia, // compat extra
-        desde: hhmm(b.desde ?? b.inicio),
-        hasta: hhmm(b.hasta ?? b.fin),
+        dia,
+        desde: hhmm(b?.desde ?? b?.inicio ?? b?.start),
+        hasta: hhmm(b?.hasta ?? b?.fin ?? b?.end),
         intervalo_min: intervalo,
       });
     }
@@ -142,7 +98,7 @@ function toFlatHorariosPayload(body) {
 
 /* ========= Axios base ========= */
 const api = axios.create({
-  baseURL: "http://127.0.0.1:8000",
+  baseURL: import.meta.env.VITE_API_URL || "http://127.0.0.1:8000",
   withCredentials: false,
   timeout: 30000,
 });
@@ -155,26 +111,18 @@ api.interceptors.request.use((config) => {
     config.headers.Authorization = `Bearer ${token}`;
   }
 
-  const url = String(config.url || "");
+  // Adaptador para /horarios/mis (opcional)
   const method = String(config.method || "get").toLowerCase();
-
+  const url = String(config.url || "");
   if (method === "post" && url.endsWith("/horarios/mis")) {
     try {
-      const body = config.data;
-      const flat = toFlatHorariosPayload(body);
-      // ⚠️ NO JSON.stringify aquí — dejá que Axios serialice
+      const flat = toFlatHorariosPayload(config.data);
       config.data = flat;
       config.headers = config.headers || {};
       config.headers["Content-Type"] = "application/json";
-      console.info("[API] Adapt payload /horarios/mis -> flat:", flat);
-    } catch (e) {
-      console.warn("[API] No se pudo adaptar payload de /horarios/mis:", e?.message || e);
-    }
+    } catch {}
   }
 
-  if (config?.method && config?.url) {
-    console.info("[API]", String(config.method || "").toUpperCase(), config.url);
-  }
   return config;
 });
 
@@ -182,13 +130,31 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (res) => res,
   (err) => {
-    const msg = errorMessage(err);
+    err._friendly = errorMessage(err);
     const st = err?.response?.status;
-    const url = err?.config?.url || "";
-    console.warn(`[API][${st || "ERR"}] ${url} :: ${msg}`);
-    // Siempre rechazamos como string para no romper renders
-    return Promise.reject(msg);
+    const reqUrl = (err?.config?.url || "").toString();
+
+    // ⛔ No limpies ni redirijas si el 401 es del propio endpoint de LOGIN
+    const isLoginCall = /\/usuarios\/login\b/.test(reqUrl);
+
+    if (st === 401 && !isLoginCall) {
+      try { clearSession(); } catch {}
+      if (window.location.pathname !== "/login") {
+        window.location.assign("/login");
+      }
+    }
+    return Promise.reject(err);
   }
 );
+
+export async function apiListEmprendedores(params = {}) {
+  const { q, rubro, limit = 50, offset = 0 } = params;
+  const res = await api.get("/emprendedores/", { params: { q, rubro, limit, offset } });
+  return res.data || [];
+}
+export async function apiListRubros() {
+  const res = await api.get("/emprendedores/rubros");
+  return res.data || [];
+}
 
 export default api;

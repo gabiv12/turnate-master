@@ -1,63 +1,94 @@
 // src/services/emprendedores.js
 import api from "./api";
+import { me } from "./usuarios";
 
-/* ---------- Mi Emprendedor con fallback ---------- */
+/* ==== Lecturas ==== */
 export async function miEmprendedor() {
+  const { data } = await api.get("/emprendedores/mi");
+  return data?.emprendedor || data;
+}
+
+/* ==== Creación tolerante (para auto-recuperar 404) ==== */
+async function crearEmprendedorMin({ nombre = "Mi Negocio", descripcion = null } = {}) {
   try {
+    const { data } = await api.post("/emprendedores", { nombre, descripcion });
+    return data?.emprendedor || data;
+  } catch { return null; }
+}
+
+async function crearPorRutasAlternas({ nombre = "Mi Negocio" } = {}) {
+  try {
+    const { data } = await api.post("/usuarios/me/emprendedor", { nombre });
+    return data?.emprendedor || data;
+  } catch {}
+  try {
+    const { data } = await api.post("/emprendedores/asegurar", { nombre });
+    return data?.emprendedor || data;
+  } catch {}
+  return null;
+}
+
+/* ==== Smart getter (intenta crear si /mi da 404) ==== */
+export async function miEmprendedorSmart({ nombreFallback } = {}) {
+  const tryGet = async () => {
     const { data } = await api.get("/emprendedores/mi");
-    return data || null;
-  } catch (e) {
-    const st = e?.response?.status;
-    if (st !== 401 && st !== 404) throw e;
-  }
-  try {
-    const { data } = await api.get("/usuarios/me/emprendedor");
-    return data || null;
-  } catch (e) {
-    const st = e?.response?.status;
-    if (st === 404) return null;
-    throw e;
-  }
-}
-
-/* ---------- Update Emprendedor ---------- */
-export async function actualizarEmprendedor(id, payload) {
-  const { data } = await api.put(`/emprendedores/${id}`, payload);
-  return data;
-}
-
-/* ---------- Crear Emprendedor (Plan B) ----------
-   Crea un Emprendedor mínimo cuando la activación falla (401/404/405).
-   Fallbacks probables según back:
-   1) POST /emprendedores
-   2) POST /usuarios/{id}/emprendedor
-   3) POST /emprendedores/ensure (si existiera)
-*/
-export async function crearEmprendedorMin({ usuario_id, nombre, descripcion, telefono, direccion }) {
-  const payload = {
-    usuario_id,
-    nombre: (nombre || "Mi Emprendimiento").trim(),
-    descripcion: descripcion || "",
-    telefono: telefono || "",
-    direccion: direccion || "",
+    return data?.emprendedor || data;
   };
-
-  const tries = [
-    { method: "post", url: `/emprendedores`, data: payload },
-    { method: "post", url: `/usuarios/${usuario_id}/emprendedor`, data: payload },
-    { method: "post", url: `/emprendedores/ensure`, data: payload },
-  ];
-
-  let lastErr = null;
-  for (const t of tries) {
-    try {
-      const { data } = await api.request(t);
-      return data;
-    } catch (e) {
-      lastErr = e;
-      const st = e?.response?.status;
-      if (![401,403,404,405].includes(st)) throw e;
-    }
+  try {
+    return await tryGet();
+  } catch (e) {
+    if (!/404/.test(String(e))) throw e;
+    const u = await me().catch(() => null);
+    const nombre = (u?.nombre || nombreFallback || "Mi Negocio").toString().trim() || "Mi Negocio";
+    let emp = await crearEmprendedorMin({ nombre });
+    if (!emp) emp = await crearPorRutasAlternas({ nombre });
+    if (emp) return await tryGet();
+    throw "Aún no activaste el plan Emprendedor.";
   }
-  throw lastErr || new Error("No se pudo crear el Emprendedor.");
+}
+
+/* ==== Actualización (lo que te faltaba) ==== */
+export async function actualizarEmprendedor(payload = {}) {
+  // 1) Ruta preferida
+  try {
+    const { data } = await api.put("/emprendedores/mi", payload);
+    return data?.emprendedor || data;
+  } catch (e1) {
+    // 2) Fallback por id si existe
+    let id = payload?.id || payload?.emprendedor_id || null;
+    if (!id) {
+      try { id = (await miEmprendedorSmart())?.id || null; } catch {}
+    }
+    if (id) {
+      try {
+        const { data } = await api.put(`/emprendedores/${id}`, payload);
+        return data?.emprendedor || data;
+      } catch (e2) {
+        // 3) Último intento con PATCH
+        const { data } = await api.patch(`/emprendedores/${id}`, payload);
+        return data?.emprendedor || data;
+      }
+    }
+    throw e1;
+  }
+}
+
+/* ==== Endpoints “mis/*” ==== */
+export async function misServicios() {
+  const { data } = await api.get("/servicios/mis");
+  return Array.isArray(data) ? data : data?.items || [];
+}
+export async function misHorarios() {
+  const { data } = await api.get("/horarios/mis");
+  return Array.isArray(data) ? data : data?.items || [];
+}
+export async function misTurnos(params = {}) {
+  const { data } = await api.get("/turnos/mis", { params });
+  return Array.isArray(data) ? data : data?.items || [];
+}
+
+/* ==== Público ==== */
+export async function publicoByCodigo(codigo) {
+  const { data } = await api.get(`/publico/emprendedores/by-codigo/${codigo}`);
+  return data;
 }

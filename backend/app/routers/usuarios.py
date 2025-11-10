@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Header, UploadFil
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session
 from typing import Optional
-import secrets, hashlib, re
+import secrets, hashlib
 from datetime import datetime
 
 from app import models, schemas
@@ -16,18 +16,29 @@ router = APIRouter(prefix="/usuarios", tags=["usuarios"])
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-_PWD_ATTRS = ("hashed_password", "password_hash", "password", "clave")
+# Lista ampliada de posibles nombres de columna para contraseñas
+_PWD_ATTRS = ("hashed_password", "password_hash", "password", "clave", "contrasena", "passhash")
 
-def get_pwd_value_from_user(u):
+def _detect_pwd_field(u) -> Optional[str]:
     for attr in _PWD_ATTRS:
         if hasattr(u, attr):
-            return getattr(u, attr)
+            return attr
     return None
 
+def get_pwd_value_from_user(u):
+    attr = _detect_pwd_field(u)
+    return getattr(u, attr) if attr else None
+
 def set_pwd_value_to_user(u, hashed_value: str) -> None:
-    for attr in _PWD_ATTRS:
-        if hasattr(u, attr):
-            setattr(u, attr, hashed_value)
+    attr = _detect_pwd_field(u)
+    if not attr:
+        # No se encontró un campo real en el modelo -> fallo explícito
+        raise HTTPException(
+            status_code=500,
+            detail="No se encontró un campo de contraseña en models.Usuario. "
+                   "Agrega una columna como 'hashed_password' o 'password_hash'."
+        )
+    setattr(u, attr, hashed_value)
 
 def verify_password(plain: str, stored: str | None) -> bool:
     """
@@ -52,7 +63,8 @@ def verify_password(plain: str, stored: str | None) -> bool:
 
 def generar_codigo_cliente(longitud: int = 8) -> str:
     alfabeto = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(secrets.choice(alfabeto) for _ in longitud * [None]).replace("None", "") or "".join(secrets.choice(alfabeto) for _ in range(longitud))
+    # elección segura sin sesgo, evita caracteres ambiguos
+    return "".join(secrets.choice(alfabeto) for _ in range(longitud))
 
 def ensure_unico_codigo(db: Session) -> str:
     for _ in range(10):
@@ -67,10 +79,16 @@ def ensure_unico_codigo(db: Session) -> str:
 def require_dev_auth(authorization: Optional[str]) -> str:
     if not authorization:
         raise HTTPException(status_code=401, detail="Falta Authorization")
-    tok = authorization.replace("Bearer", "").strip()
+    s = authorization.strip()
+    # Acepta "Bearer <tok>", "bearer <tok>", o directamente el token
+    if s.lower().startswith("bearer "):
+        tok = s.split(None, 1)[1].strip()
+    else:
+        tok = s
     if not tok.startswith("dev-"):
         raise HTTPException(status_code=401, detail="Token inválido")
     return tok
+
 
 def _email_fingerprint(email: str) -> str:
     return sha256(email or "")[:24]
@@ -94,15 +112,10 @@ def get_current_user(db: Session, authorization: Optional[str]):
     if not suffix:
         raise HTTPException(status_code=401, detail="Sesión inválida")
 
-    user = None
     for u in db.query(models.Usuario).all():
         if _email_fingerprint(getattr(u, "email", "") or "") == suffix:
-            user = u
-            break
-
-    if not user:
-        raise HTTPException(status_code=401, detail="Sesión inválida")
-    return user
+            return u
+    raise HTTPException(status_code=401, detail="Sesión inválida")
 
 def apply_user_updates(u: models.Usuario, data: dict) -> None:
     for k in ("email", "nombre", "apellido", "dni"):
@@ -111,7 +124,6 @@ def apply_user_updates(u: models.Usuario, data: dict) -> None:
             setattr(u, k, v)
 
 def looks_like_email(s: str) -> bool:
-    # DEV-friendly: alcanza @ y sin espacios (acepta admin@admin)
     if not s or not isinstance(s, str): return False
     s = s.strip()
     return "@" in s and " " not in s
@@ -119,7 +131,7 @@ def looks_like_email(s: str) -> bool:
 async def extract_email_password(request: Request) -> tuple[str, str]:
     """
     Acepta application/json o form (urlencoded/multipart).
-    Fields tolerados: email/usuario/username y password/clave.
+    Fields tolerados: email/usuario/username/user y password/clave/pass.
     """
     ct = (request.headers.get("content-type") or "").lower()
     data = {}
@@ -149,7 +161,7 @@ async def extract_email_password(request: Request) -> tuple[str, str]:
     if not email or not password:
         raise HTTPException(status_code=422, detail="Se requieren 'email' y 'password'")
     if not looks_like_email(email):
-        # Permitimos admin@admin
+        # Permitimos admin@admin en dev
         pass
     return email, password
 
@@ -169,10 +181,6 @@ class PasswordChangeIn(BaseModel):
     current_password: str
     new_password: str
 
-class LoginOut(BaseModel):
-    token: Optional[str] = None
-    user: schemas.UsuarioOut
-
 # =============== Registro / Login / Me ===============
 @router.post("/registro", response_model=schemas.UsuarioOut, status_code=201)
 def registro(payload: schemas.UsuarioCreate, db: Session = Depends(get_db)):
@@ -189,18 +197,25 @@ def registro(payload: schemas.UsuarioCreate, db: Session = Depends(get_db)):
         is_active=True,
         created_at=datetime.utcnow() if hasattr(models.Usuario, "created_at") else None,
     )
+
+    # 🔐 Guarda el hash en un campo REAL del modelo, o falla explícito si no existe
     set_pwd_value_to_user(u, sha256(payload.password))
+
     db.add(u)
     db.commit()
     db.refresh(u)
 
-    # Serializo con email seguro para pasar EmailStr
     u_out = {**u.__dict__}
     u_out["email"] = _safe_email_for_output(u_out.get("email"))
     return schemas.UsuarioOut.model_validate(u_out)
 
-@router.post("/login", response_model=LoginOut)
+@router.post("/login")
 async def login(request: Request, db: Session = Depends(get_db)):
+    """
+    DEV-friendly login:
+    - Acepta password en texto plano, sha256 o bcrypt (si passlib disponible).
+    - Devuelve ambas formas compatibles para el front: { token, user, user_schema }.
+    """
     email, password = await extract_email_password(request)
 
     u = db.query(models.Usuario).filter(models.Usuario.email == email).first()
@@ -211,7 +226,14 @@ async def login(request: Request, db: Session = Depends(get_db)):
 
     u_out = {**u.__dict__}
     u_out["email"] = _safe_email_for_output(u_out.get("email"))
-    return LoginOut(token=token, user=schemas.UsuarioOut.model_validate(u_out))
+    user_schema = schemas.UsuarioOut.model_validate(u_out)
+
+    # 🔄 Devolvemos claves duplicadas para máxima compatibilidad con front viejos
+    return {
+        "token": token,
+        "user": user_schema,         # por si el front usa 'user'
+        "user_schema": user_schema,  # por si el front espera 'user_schema'
+    }
 
 @router.get("/me", response_model=schemas.UsuarioOut)
 def me(authorization: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
@@ -275,6 +297,10 @@ def update_me(
     return schemas.UsuarioOut.model_validate(u_out)
 
 # =============== Password ===============
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
+
 @router.put("/me/password", status_code=200)
 def change_password(
     payload: PasswordChangeIn,

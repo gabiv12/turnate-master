@@ -17,24 +17,21 @@ export function getStoredUser() {
 }
 
 export async function login({ email, username, identity, password }) {
-  // El back usa email como “usuario”. Mandamos el mejor campo disponible.
   const payload =
     email ? { email, password } :
     identity ? { identity, password } :
     username ? { username, password } :
-    { email: username, password }; // fallback
+    { email: username, password };
 
   const { data } = await api.post("/usuarios/login", payload);
 
   const token = data?.access_token || data?.token || data?.jwt;
-  const user = data?.user || data?.usuario || data;
+  const user = data?.user || data?.usuario || data?.user_schema || data;
 
-  if (!token || !user) {
-    throw new Error("Respuesta de login incompleta.");
-  }
+  if (!token || !user) throw new Error("Respuesta de login incompleta.");
 
-  setAuthToken(token);
-  setStoredUser(user);
+  // ✅ Persistimos atómicamente token+usuario
+  setSession(token, user);
   return { token, user };
 }
 

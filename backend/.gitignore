@@ -221,3 +221,36 @@ $RECYCLE.BIN/
 !frontend/src/
 !backend/app/
 
+# --- Frontend: caches y logs ---
+frontend/.vite/
+frontend/.eslintcache
+frontend/.stylelintcache
+frontend/.parcel-cache/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# --- Backend: caches de linters/tools ---
+backend/.ruff_cache/
+
+# --- Bases de datos locales (SQLite) ---
+*.sqlite
+*.db
+*-wal
+*-shm
+
+# --- Uploads/medios temporales (si aplica) ---
+backend/uploads/
+backend/media/
+frontend/public/uploads/
+frontend/public/tmp/
+
+# --- Docker overrides locales ---
+docker-compose.override.yml
+
+# --- Archivos de sistema/editores ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

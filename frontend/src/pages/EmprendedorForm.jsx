@@ -1,6 +1,6 @@
 // src/pages/EmprendedorForm.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { miEmprendedor, actualizarEmprendedor } from "../services/emprendedores.js";
+import * as EmpSvc from "../services/emprendedores.js"; // <- import robusto (evita HMR/treeshaking)
 import { useUser } from "../context/UserContext.jsx";
 import Input from "../components/Input";
 import Button from "../components/Button";
@@ -155,7 +155,7 @@ export default function EmprendedorForm() {
       setLoading(true);
       try {
         await refreshUser?.();
-        const data = await miEmprendedor().catch(() => null); // 404 => no emprendedor
+        const data = await EmpSvc.miEmprendedor().catch(() => null); // 404 => no emprendedor
         if (!data || !data.id) {
           setEmp(null);
           setExtras(null);
@@ -292,7 +292,7 @@ export default function EmprendedorForm() {
         nombre: emp?.nombre || emp?.negocio || "",
         descripcion: emp?.descripcion || "",
       };
-      const updated = await actualizarEmprendedor(emp.id, payload);
+      const updated = await EmpSvc.actualizarEmprendedor(emp.id, payload);
       setEmp(updated);
       persistExtrasLocal();
       setMsg("Datos guardados.");
@@ -307,7 +307,7 @@ export default function EmprendedorForm() {
     setShowActivate(false);
     try {
       await refreshUser?.();
-      const data = await miEmprendedor().catch(() => null);
+      const data = await EmpSvc.miEmprendedor().catch(() => null);
       setEmp(data || null);
       if (data?.id) {
         const raw = localStorage.getItem(`emp_extras_${data.id}`);

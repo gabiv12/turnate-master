@@ -1,31 +1,48 @@
 // src/pages/Login.jsx
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { useUser } from "../context/UserContext.jsx";
 import { login as loginSvc, me as meSvc } from "../services/usuarios";
-import Input from "../components/Input";
 
 const LOGO_SRC = "/images/TurnateLogo.png";
+const cx = (...c) => c.filter(Boolean).join(" ");
 
-function SimpleModal({ open, title, onClose, children }) {
-  if (!open) return null;
+function StatusOverlay({ show, mode = "loading", title, caption, onClose }) {
+  if (!show) return null;
+  const isOK = mode === "success";
   return (
-    <div className="fixed inset-0 z-[60]">
-      <div className="absolute inset-0 bg-slate-900/50" onClick={onClose} />
-      <div className="absolute inset-0 grid place-items-center p-4">
-        <div className="w-full max-w-md rounded-2xl bg-white shadow-xl ring-1 ring-slate-200">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-            <h3 className="text-slate-800 font-semibold">{title}</h3>
-            <button
-              onClick={onClose}
-              className="rounded-lg px-2 py-1 text-sm text-slate-600 hover:bg-slate-100"
-              aria-label="Cerrar"
-            >
-              ✕
-            </button>
-          </div>
-          <div className="p-5">{children}</div>
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-slate-900/60 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 p-6 text-center">
+        <div
+          className={cx(
+            "mx-auto mb-4 h-16 w-16 grid place-items-center rounded-full",
+            isOK ? "bg-blue-50" : "bg-slate-100"
+          )}
+        >
+          {isOK ? (
+            <svg viewBox="0 0 24 24" className="h-9 w-9 text-blue-600">
+              <path
+                fill="currentColor"
+                d="M12 22a10 10 0 1 1 0-20 10 10 0 0 1 0 20Zm4.7-12.7a1 1 0 0 0-1.4-1.4L11 12.2l-2.3-2.3a1 1 0 1 0-1.4 1.4l3 3a1 1 0 0 0 1.4 0l5-5Z"
+              />
+            </svg>
+          ) : (
+            <svg className="h-7 w-7 animate-spin text-slate-600" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" className="opacity-20" />
+              <path d="M21 12a9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="2" className="opacity-80" />
+            </svg>
+          )}
         </div>
+        <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+        {caption && <p className="mt-1 text-sm text-slate-600">{caption}</p>}
+        {isOK && (
+          <button
+            onClick={onClose}
+            className="mt-4 rounded-xl bg-blue-600 text-white px-4 py-2 text-sm font-semibold shadow hover:brightness-110"
+          >
+            Entendido
+          </button>
+        )}
       </div>
     </div>
   );
@@ -38,128 +55,72 @@ export default function Login() {
 
   const [emailOrUser, setEmailOrUser] = useState("");
   const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
 
-  const [forgotOpen, setForgotOpen] = useState(false);
-  const [forgotEmail, setForgotEmail] = useState("");
-  const [forgotSending, setForgotSending] = useState(false);
+  // overlay
+  const [overlay, setOverlay] = useState({ show: false, mode: "loading", title: "", caption: "" });
 
-  const formRef = useRef(null);
-
-  // Si ya hay sesión, mandamos al panel
   useEffect(() => {
     if (isAuthenticated) navigate("/reservar", { replace: true });
   }, [isAuthenticated, navigate]);
 
   useEffect(() => {
-    if (searchParams.get("registered") === "1") {
-      setMsg("✅ Cuenta creada. Iniciá sesión para continuar.");
+    if (searchParams.get("registered") === "1" || searchParams.get("nuevo") === "1") {
+      setMsg(" Cuenta creada. Iniciá sesión para continuar.");
     }
   }, [searchParams]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
-    if (loading) return;
-
-    setLoading(true);
     setMsg("");
-    try {
-      const identity = emailOrUser.trim();
-      const pass = password.trim();
-      if (!identity || !pass) {
-        throw new Error("Completá email y contraseña.");
-      }
-
-      // 1) Login al backend
-      const { token, user } = await loginSvc({ email: identity, password: pass });
-      if (!token) throw new Error("El servidor no devolvió token.");
-
-      // 2) Guardar sesión en el contexto (token + user si vino)
-      loginFromResponse(token, user || null);
-
-      // 3) Si no vino user, pedimos /usuarios/me para sincronizar
-      if (!user) {
-        try { await refreshUser(); } catch {}
-      }
-
-      // 4) Ir al panel
-      navigate("/reservar", { replace: true });
-    } catch (err) {
-      const d = err?.response?.data;
-      const m =
-        d?.detail ||
-        d?.message ||
-        (typeof d === "object" ? Object.values(d)[0] : null) ||
-        err?.message ||
-        "Error al iniciar sesión.";
-      setMsg(`⚠️ ${m}`);
-    } finally {
-      setLoading(false);
+    const identity = emailOrUser.trim();
+    const pass = password.trim();
+    if (!identity || !pass) {
+      setMsg("⚠️ Completá email y contraseña.");
+      return;
     }
-  };
-
-  const handleForgot = async (e) => {
-    e.preventDefault();
-    if (!forgotEmail) return;
-    setForgotSending(true);
-    setMsg("");
     try {
-      const base = (import.meta?.env?.VITE_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
-      const candidates = [
-        "/usuarios/recuperar",
-        "/auth/forgot",
-        "/usuarios/forgot",
-        "/auth/password/forgot",
-      ];
-      let ok = false;
-      let serverMsg = null;
-      for (const p of candidates) {
-        try {
-          const r = await fetch(`${base}${p}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email: forgotEmail }),
-          });
-          if (r.ok) {
-            const j = await r.json().catch(() => ({}));
-            ok = true;
-            serverMsg = j?.detail || j?.message || null;
-            break;
-          }
-        } catch {}
-      }
-      if (!ok) throw new Error("No se pudo iniciar el proceso. Probá más tarde.");
-      setMsg(serverMsg || "📬 Si el email existe, te enviamos instrucciones.");
-      setForgotOpen(false);
-      setForgotEmail("");
+      setOverlay({ show: true, mode: "loading", title: "Ingresando…", caption: "Verificando tus credenciales" });
+
+      const { token, user } = await loginSvc({ email: identity, password: pass });
+      if (loginFromResponse && token) loginFromResponse(token, user || null);
+
+      // sincronizar /me si hiciera falta
+      try { await refreshUser(); } catch {}
+
+      setOverlay({
+        show: true,
+        mode: "success",
+        title: "¡Bienvenido!",
+        caption: "Redirigiendo a tu panel…",
+      });
+
+      setTimeout(() => navigate("/reservar", { replace: true }), 900);
     } catch (err) {
-      setMsg(`⚠️ ${err.message || "No se pudo enviar el email"}`);
-    } finally {
-      setForgotSending(false);
+      setMsg(`⚠️ ${err.message || "Error al iniciar sesión."}`);
+      setOverlay({ show: false, mode: "loading", title: "", caption: "" });
     }
   };
 
   return (
     <div className="relative pt-24">
-      <div className="fixed inset-0 -z-10 bg-gradient-to-b from-blue-700 via-sky-500 to-cyan-400" />
+      <StatusOverlay
+        show={overlay.show}
+        mode={overlay.mode}
+        title={overlay.title}
+        caption={overlay.caption}
+        onClose={() => setOverlay({ show: false, mode: "loading", title: "", caption: "" })}
+      />
 
+      <div className="fixed inset-0 -z-10 bg-gradient-to-b from-blue-700 via-sky-500 to-cyan-400" />
       <div className="min-h-[calc(100vh-240px)] flex items-center justify-center px-4">
-        <div className="w-full max-w-md rounded-2xl border border-white/20 bg-white/90 shadow-2xl backdrop-blur">
+        <div className="w-full max-w-md rounded-2xl mb-20 border border-white/20 bg-white/90 shadow-2xl backdrop-blur">
           <div className="px-6 pt-6 text-center">
-            <div className="inline-flex items-center gap-1 select-none">
-              <img
-                src={LOGO_SRC}
-                alt="Turnate"
-                className="h-12 w-auto"
-                onError={(e) => (e.currentTarget.style.display = "none")}
-                draggable="false"
-              />
+            <div className="inline-flex items-center gap-2 select-none">
+              <img src={LOGO_SRC} alt="Turnate" className="h-12 w-auto" draggable="false" />
               <span className="text-2xl font-extrabold tracking-tight text-white drop-shadow-[0_2px_3px_rgba(0,0,0,0.8)]">
                 Turnate
               </span>
-
-
             </div>
             <h1 className="mt-3 text-xl font-semibold text-slate-800">Iniciar sesión</h1>
             <p className="text-sm text-slate-500">Accedé a tu cuenta para gestionar tus turnos.</p>
@@ -178,86 +139,42 @@ export default function Login() {
               </div>
             )}
 
-            <form ref={formRef} onSubmit={handleLogin} className="grid gap-3">
-              <Input
-                type="text"
+            <form onSubmit={handleLogin} className="grid gap-3">
+              <input
+                type="email"
                 placeholder="Email"
                 value={emailOrUser}
                 onChange={(e) => setEmailOrUser(e.target.value)}
                 required
-                className="rounded-xl bg-white/90"
+                className="rounded-xl border border-slate-200 bg-white/90 px-4 py-3"
               />
-              <Input
+              <input
                 type="password"
                 placeholder="Contraseña"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="rounded-xl bg-white/90"
+                className="rounded-xl border border-slate-200 bg-white/90 px-4 py-3"
               />
 
               <button
                 type="submit"
-                disabled={loading}
-                className="mt-1 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-400 text-white font-bold py-2 px-4 shadow-lg ring-1 ring-blue-300/40 disabled:opacity-60"
+                className="mt-1 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-400 text-white font-bold py-2.5 px-4 shadow-lg ring-1 ring-blue-300/40"
               >
-                {loading ? "Ingresando…" : "Ingresar"}
+                Ingresar
               </button>
 
               <button
                 type="button"
-                onClick={() => setForgotOpen(true)}
+                onClick={() => (window.location.href = "/registro")}
                 className="text-sm text-blue-700 underline mt-1 justify-self-center"
               >
-                ¿Olvidaste tu contraseña?
+                ¿No tenés cuenta? Registrate
               </button>
             </form>
-
-            <div className="mt-4 text-sm text-gray-700 text-center">
-              ¿No tenés cuenta?{" "}
-              <Link to="/registro" className="text-blue-700 underline">
-                Registrate
-              </Link>
-            </div>
           </div>
         </div>
       </div>
-
-      <SimpleModal
-        open={forgotOpen}
-        title="Recuperar contraseña"
-        onClose={() => setForgotOpen(false)}
-      >
-        <form onSubmit={handleForgot} className="grid gap-3">
-          <Input
-            type="email"
-            placeholder="Tu email"
-            value={forgotEmail}
-            onChange={(e) => setForgotEmail(e.target.value)}
-            required
-            className="rounded-xl bg-white/80"
-          />
-        </form>
-        <div className="flex gap-2 mt-2">
-          <button
-            onClick={handleForgot}
-            disabled={forgotSending}
-            className="rounded-xl bg-blue-600 text-white font-semibold px-4 py-2 disabled:opacity-60"
-          >
-            {forgotSending ? "Enviando…" : "Enviar"}
-          </button>
-          <button
-            type="button"
-            onClick={() => setForgotOpen(false)}
-            className="rounded-xl border border-slate-300 bg-white text-slate-700 px-4 py-2 text-sm font-semibold hover:bg-slate-50"
-          >
-            Cancelar
-          </button>
-        </div>
-        <p className="text-xs text-slate-500 mt-2">
-          Probamos endpoints comunes; si tu backend no los tiene, no se hace ningún cambio.
-        </p>
-      </SimpleModal>
     </div>
   );
 }

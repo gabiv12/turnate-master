@@ -122,7 +122,7 @@ export default function Header() {
   const initial = (displayName?.[0] || "U").toUpperCase();
 
   return (
-    <header className="bg-gradient-to-r from-blue-600 to-cyan-400 shadow-lg fixed inset-x-0 top-0 z-50">
+    <header className="bg-blue-600 fixed inset-x-0 top-0 z-50 h-24">
       <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-10 py-4 md:py-5 flex items-center justify-between">
         <Link to="/" className="flex items-center gap-3">
           <img

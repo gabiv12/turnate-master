@@ -9,11 +9,15 @@ export default function ProtectedRoute({ requireRole }) {
   const loc = useLocation();
   const hasToken = !!getAuthToken();
 
-  if (!hasToken || !isAuthenticated) {
+  // Sin token => a login
+  if (!hasToken) {
     return <Navigate to="/login" state={{ from: loc }} replace />;
   }
 
+  // Con token, permití el acceso mientras se hidrata el usuario.
   if (requireRole) {
+    if (!user) return <Outlet />;
+
     const roles = new Set();
     if (Array.isArray(user?.roles)) user.roles.forEach(r => roles.add(String(r).toLowerCase()));
     if (user?.rol) roles.add(String(user.rol).toLowerCase());

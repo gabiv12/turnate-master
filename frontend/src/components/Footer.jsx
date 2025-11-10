@@ -8,7 +8,7 @@ export default function Footer() {
   const isAdmin = String(user?.rol || "").toLowerCase() === "admin";
 
   return (
-    <footer className="mt-12 bg-slate-950 text-slate-300">
+    <footer className="bg-slate-950 text-slate-300">
       {/* franja superior con gradiente */}
       <div className="h-[2px] w-full bg-gradient-to-r from-blue-600 via-sky-500 to-cyan-400" />
 

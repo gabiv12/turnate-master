@@ -13,7 +13,7 @@ const ItemLink = ({ to, children }) => (
     className={({ isActive }) =>
       [
         "block w-full text-left rounded-xl px-4 py-3 text-sm font-semibold transition shadow-sm",
-        isActive ? "bg-white text-sky-700" : "bg-white/10 text-white hover:bg-white/20",
+        isActive ? "bg-white text-sky-700" : "bg-white/10 text-white hover:bg-white",
       ].join(" ")
     }
   >
@@ -48,16 +48,16 @@ export default function PanelShell() {
 
   return (
     // <div className="min-h-screen bg-gradient-to-b from-blue-600 to-cyan-400">
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-slate-100 ">
 
       <Header />
 
-      <div className="pt-24 pb-16">
-        <div className="w-full px-4 lg:pl-6 lg:pr-0">
-          <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-6">
+      <div className="pt-24">
+        <div className="w-full">
+          <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr]">
             <aside className="lg:sticky lg:top-[88px] self-start">
               <div className="lg:hidden mb-3">
-                <button
+                <button 
                   onClick={() => setOpen((s) => !s)}
                   className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700"
                 >
@@ -68,13 +68,13 @@ export default function PanelShell() {
               <div
                 className={[
                   // "rounded-3xl rounded-tr-none p-[10px] overflow-hidden",
-                  "bg-gradient-to-b from-blue-700 to-cyan-500",
-                  "bg-blue-600",
+                  // "bg-gradient-to-b from-blue-700 to-cyan-500",
+                  "bg-blue-600 h-screen",
 
                   open ? "block" : "hidden lg:block",
                 ].join(" ")}
               >
-                <div className="rounded-2xl bg-white/10 p-4">
+                <div className="rounded-2xl bg-transparent p-4">
                   <div className="mb-3">
                     <div className="text-white/90 text-sm font-semibold">Panel</div>
                     <div className="text-white/80 text-xs">Herramientas rápidas</div>
@@ -101,13 +101,6 @@ export default function PanelShell() {
                     </button>
                   </div>
 
-                  <div className="mt-3 text-[11px] text-white/80">
-                    Hola, {user?.username || user?.nombre || "Usuario"} —{" "}
-                    <span className="font-semibold">
-                      {isAdm ? "Admin" : isEmp ? "Emprendedor" : "Cliente"}
-                    </span>
-                    .
-                  </div>
                 </div>
               </div>
             </aside>

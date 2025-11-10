@@ -1,134 +1,138 @@
 // src/services/usuarios.js
-import api, { setAuthToken, setUser as setUserLS } from "./api";
+import api, { setSession, getSession } from "./api";
 
-/* ----------- Registro / Login / Me ----------- */
-export async function register({ email, password, nombre, apellido, dni }) {
-  const payload = {
-    email: String(email || "").trim(),
-    password: String(password || "").trim(),
-    nombre: (nombre || "").trim() || undefined,
-    apellido: (apellido || "").trim() || undefined,
-    dni: (dni || "").trim() || undefined,
-  };
-  const { data } = await api.post("/usuarios/registro", payload);
-  if (data?.token) setAuthToken(data.token);
-  if (data?.user)  setUserLS(data.user);
-  return data;
+/* ================= Helpers de sesión ================= */
+function mergeUserInSession(nextUser) {
+  const { token, user } = getSession();
+  const merged = { ...(user || {}), ...(nextUser || {}) };
+  setSession({ token, user: merged });
+  return merged;
 }
 
+/* ================= Auth ================= */
+
+/**
+ * LOGIN
+ * Esperado: { token, user_schema } o { token, user }
+ */
 export async function login({ email, password }) {
-  const { data } = await api.post("/usuarios/login", { email, password });
-  if (data?.token) setAuthToken(data.token);
-  if (data?.user)  setUserLS(data.user);
-  return data;
+  const res = await api.post("/usuarios/login", { email, password });
+  const token = res?.data?.token || res?.data?.access_token || null;
+  const user  = res?.data?.user_schema || res?.data?.user || null;
+  setSession({ token, user });
+  return { token, user };
 }
 
+/** PERFIL autenticado */
 export async function me() {
-  const { data } = await api.get("/usuarios/me");
-  if (data) setUserLS(data);
-  return data;
+  const res = await api.get("/usuarios/me");
+  return res.data || null;
 }
 
-/* ----------- Update perfil (prioriza /usuarios/{id}) ----------- */
-export async function updatePerfilSmart(payload = {}, userId) {
-  // sanitizar
-  const clean = {};
-  for (const [k, v] of Object.entries(payload || {})) {
-    if (v !== undefined) clean[k] = typeof v === "string" ? v.trim() : v;
-  }
-
-  // obtener id
-  let uid = userId;
-  if (!uid) {
-    try { uid = (await me())?.id; } catch {}
-  }
-  if (!uid) throw new Error("No se pudo determinar el ID de usuario.");
-
-  const attempts = [
-    { method: "put",   url: `/usuarios/${uid}` },
-    { method: "patch", url: `/usuarios/${uid}` },
-    { method: "patch", url: "/usuarios/me" },
-    { method: "put",   url: "/usuarios/me" },
+/**
+ * REGISTRO
+ * Fallbacks comunes: /usuarios/registrar, /usuarios/registro, /usuarios/register, /usuarios (POST)
+ * Si el back devuelve token/user, guardamos sesión.
+ */
+export async function register(payload) {
+  const candidates = [
+    "/usuarios/registrar",
+    "/usuarios/registro",
+    "/usuarios/register",
+    "/usuarios",
   ];
 
   let lastErr = null;
-  for (const a of attempts) {
+  for (const path of candidates) {
     try {
-      const { data } = await api.request({ method: a.method, url: a.url, data: clean });
-
-      // token nuevo?
-      const newToken = data?.token || data?.access_token || data?.jwt || null;
-      if (newToken) setAuthToken(newToken);
-
-      // merge y persistir
-      const merged = await _mergeUserLocal(data, clean);
-      return { data: merged };
+      const res = await api.post(path, payload);
+      const token = res?.data?.token || res?.data?.access_token || null;
+      const user  = res?.data?.user_schema || res?.data?.user || null;
+      if (token || user) {
+        setSession({
+          token: token ?? getSession().token,
+          user : user  ?? getSession().user,
+        });
+      }
+      return res.data || { ok: true };
     } catch (e) {
       lastErr = e;
-      const st = e?.response?.status;
-      if (st === 401 || st === 403) throw e;             // auth → cortar
-      if (![400,404,405,409,422].includes(st)) throw e;  // errores "no esperables" → cortar
-      // si es 400/404/405/409/422, probamos el siguiente intento
     }
   }
-  throw lastErr || new Error("No se pudo actualizar el perfil.");
+  throw lastErr ?? new Error("No se pudo registrar.");
 }
 
-/* ----------- Password ----------- */
-export async function changePassword({ current_password, new_password }) {
-  const { data } = await api.put("/usuarios/me/password", {
-    current_password,
-    new_password,
-  });
-  return data;
-}
-
-/* ----------- Activar Emprendedor ----------- */
+/**
+ * ACTIVAR EMPRENDEDOR
+ * Soporta que el back devuelva token y/o user nuevos.
+ */
 export async function activarEmprendedor(userId) {
-  let uid = userId;
-  if (!uid) {
-    try { uid = (await me())?.id; } catch {}
+  const res = await api.put(`/usuarios/${userId}/activar_emprendedor`);
+  const token = res?.data?.token || res?.data?.access_token || null;
+  const user  = res?.data?.user_schema || res?.data?.user || null;
+  if (token || user) {
+    setSession({
+      token: token ?? getSession().token,
+      user : user  ?? getSession().user,
+    });
   }
-  if (!uid) throw new Error("Falta userId");
+  return res.data;
+}
 
-  const methods = ["put", "post", "patch"];
-  const url = `/usuarios/${uid}/activar_emprendedor`;
+/* ================= Perfil (UPDATE) ================= */
+
+/**
+ * updatePerfilSmart(payload, userId?)
+ * Intenta actualizar el perfil del usuario con varios endpoints comunes:
+ * 1) PATCH /usuarios/me
+ * 2) PUT   /usuarios/me
+ * 3) PATCH /usuarios/{id}
+ * 4) PUT   /usuarios/{id}
+ * Si la respuesta trae el user actualizado, lo guarda en sesión; si no, re-lee /usuarios/me.
+ */
+export async function updatePerfilSmart(payload, userId = null) {
+  const id = userId ?? getSession()?.user?.id ?? null;
+
+  // candidatos ordenados por preferencia
+  const candidates = [
+    { method: "patch", url: "/usuarios/me" },
+    { method: "put",   url: "/usuarios/me" },
+    ...(id ? [
+      { method: "patch", url: `/usuarios/${id}` },
+      { method: "put",   url: `/usuarios/${id}` },
+    ] : []),
+  ];
+
   let lastErr = null;
-
-  for (const m of methods) {
+  for (const c of candidates) {
     try {
-      const { data } = await api.request({ method: m, url, data: {} });
-      if (data?.token) setAuthToken(data.token);
-      try { await me(); } catch {}
-      return data;
+      const res = await api[c.method](c.url, payload);
+      const updated =
+        res?.data?.user_schema ||
+        res?.data?.user ||
+        res?.data ||
+        null;
+
+      if (updated) {
+        return mergeUserInSession(updated);
+      }
+
+      // si no vino user, re-leemos /me
+      try {
+        const fresh = await me();
+        return mergeUserInSession(fresh || {});
+      } catch {
+        return getSession().user || null;
+      }
     } catch (e) {
       lastErr = e;
-      const st = e?.response?.status;
-      if (st === 401 || st === 403) throw e; // auth → cortar
-      // 404/405/422 seguimos probando
+      // seguimos probando siguientes rutas
     }
   }
-  throw lastErr || new Error("No se pudo activar el modo Emprendedor.");
+  throw lastErr ?? new Error("No se pudo actualizar el perfil.");
 }
 
-/* ----------- Utils ----------- */
-async function _mergeUserLocal(serverData, payload) {
-  let localUser = null;
-  try {
-    const raw = localStorage.getItem("user");
-    localUser = raw ? JSON.parse(raw) : null;
-  } catch {}
-
-  const serverUser = serverData?.user ?? serverData ?? {};
-  const merged = {
-    ...(localUser || {}),
-    ...serverUser,
-    email:    serverUser.email    ?? payload.email    ?? localUser?.email,
-    nombre:   serverUser.nombre   ?? payload.nombre   ?? localUser?.nombre,
-    apellido: serverUser.apellido ?? payload.apellido ?? localUser?.apellido,
-    dni:      serverUser.dni      ?? payload.dni      ?? localUser?.dni,
-  };
-
-  setUserLS(merged);
-  return merged;
-}
+/** Alias por compatibilidad con código existente */
+export const updatePerfil = updatePerfilSmart;
+export const registerUser = register;
+export async function registrar(datos) { return register(datos); }

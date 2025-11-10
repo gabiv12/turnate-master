@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import Button from "../components/Button";
 import Input from "../components/Input";
 import { useUser } from "../context/UserContext.jsx";
-import api, { getAuthToken, setUser as lsSetUser } from "../services/api";
+import api, { getAuthToken, setUser as lsSetUser, setSession as lsSetSession } from "../services/api";
 import { me as meSvc, updatePerfilSmart } from "../services/usuarios";
 
 const LABEL = "block text-sm font-semibold text-slate-700 mb-1";
@@ -16,6 +16,48 @@ const CARD =
 const WRAP =
   "mx-auto max-w-6xl px-4 md:px-6 py-6";
 
+/* ===== Overlay uniforme (mismo estilo que Reservar) ===== */
+function StatusOverlay({ show, mode = "loading", title, caption, onClose }) {
+  if (!show) return null;
+  const isOK = mode === "success";
+  return (
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-slate-900/60 backdrop-blur-sm">
+      <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 p-6 text-center">
+        <div
+          className={[
+            "mx-auto mb-4 h-16 w-16 grid place-items-center rounded-full",
+            isOK ? "bg-emerald-50" : "bg-slate-100",
+          ].join(" ")}
+        >
+          {isOK ? (
+            <svg viewBox="0 0 24 24" className="h-9 w-9 text-emerald-600">
+              <path
+                fill="currentColor"
+                d="M12 22a10 10 0 1 1 0-20 10 10 0 0 1 0 20Zm4.7-12.7a1 1 0 0 0-1.4-1.4L11 12.2l-2.3-2.3a1 1 0 1 0-1.4 1.4l3 3a1 1 0 0 0 1.4 0l5-5Z"
+              />
+            </svg>
+          ) : (
+            <svg className="h-7 w-7 animate-spin text-slate-600" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" className="opacity-20" />
+              <path d="M21 12a9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="2" className="opacity-80" />
+            </svg>
+          )}
+        </div>
+        <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+        {caption && <p className="mt-1 text-sm text-slate-600">{caption}</p>}
+        {isOK && (
+          <button
+            onClick={onClose}
+            className="mt-4 rounded-xl bg-emerald-600 text-white px-4 py-2 text-sm font-semibold shadow hover:brightness-110"
+          >
+            Entendido
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const friendlyError = (err) => {
   const st = err?.response?.status;
   if (st === 401) return "Tu sesión se cerró. Iniciá sesión y volvé a intentar.";
@@ -27,9 +69,9 @@ const friendlyError = (err) => {
 
 export default function Perfil() {
   // Context (si no existe, que no rompa)
-  let ctx = { user: null, setSession: null };
+  let ctx = { user: null };
   try { ctx = useUser() || ctx; } catch {}
-  const { user, setSession } = ctx;
+  const { user } = ctx;
 
   const fileRef = useRef(null);
   const [msg, setMsg] = useState("");
@@ -49,7 +91,8 @@ export default function Perfil() {
   const [avatarSupported, setAvatarSupported] = useState(true);
   const [avatarSaving, setAvatarSaving] = useState(false);
 
-  // Seguridad
+  // Seguridad (acordeón)
+  const [secOpen, setSecOpen] = useState(false);
   const [secMsg, setSecMsg] = useState("");
   const [secSaving, setSecSaving] = useState(false);
   const [secForm, setSecForm] = useState({ actual: "", nueva: "", confirmar: "" });
@@ -80,7 +123,7 @@ export default function Perfil() {
     setForm((p) => ({ ...p, [name]: value }));
   };
 
-  // ✅ Usa updatePerfilSmart (prioriza /usuarios/{id})
+  // Guarda perfil usando updatePerfilSmart (devuelve objeto usuario)
   const savePerfil = async (e) => {
     e.preventDefault();
     setSaving(true);
@@ -93,22 +136,20 @@ export default function Perfil() {
         dni:      typeof form.dni      === "string" ? form.dni.trim()      : undefined,
       };
 
-      const r = await updatePerfilSmart(payload);
-      const updated = r?.data || payload;
+      // updatePerfilSmart retorna el usuario actualizado (no res.data)
+      const updatedUser = await updatePerfilSmart(payload);
 
-      // Actualizar contexto/LS sin perder token
-      if (setSession) {
-        const currentToken = getAuthToken();
-        setSession(currentToken, updated);
-      }
-      lsSetUser(updated);
+      // Actualizar sesión en LS manteniendo el token actual
+      const currentToken = getAuthToken();
+      lsSetSession(currentToken, updatedUser);
+      lsSetUser(updatedUser); // redundante pero inocuo: asegura LS consistente
 
       setForm((p) => ({
         ...p,
-        email:    updated.email    ?? p.email,
-        nombre:   updated.nombre   ?? p.nombre,
-        apellido: updated.apellido ?? p.apellido,
-        dni:      updated.dni      ?? p.dni,
+        email:    updatedUser?.email    ?? p.email,
+        nombre:   updatedUser?.nombre   ?? p.nombre,
+        apellido: updatedUser?.apellido ?? p.apellido,
+        dni:      updatedUser?.dni      ?? p.dni,
       }));
 
       setMsg("Cambios guardados.");
@@ -136,7 +177,8 @@ export default function Perfil() {
     setAvatarMsg("");
     try {
       const fd = new FormData();
-      fd.append("avatar", avatarFile);
+      // backend espera el campo "file"
+      fd.append("file", avatarFile);
       const r = await api.post("/usuarios/me/avatar", fd, {
         headers: { "Content-Type": "multipart/form-data" },
       });
@@ -187,11 +229,19 @@ export default function Perfil() {
 
   return (
     <div className="min-h-[100dvh] bg-slate-50/50">
+      <StatusOverlay
+        show={overlayBusy}
+        mode="loading"
+        title="Procesando…"
+        caption=""
+        onClose={() => {}}
+      />
+
       {/* ===== Bloque: Datos de perfil ===== */}
       <div className={WRAP}>
         <div className={CARD}>
           <div className="mb-4">
-            <h2 className="text-xl font-bold text-slate-900">Perfil</h2>
+            <h2 className="text-2xl md:text-3xl font-semibold font-bold text-slate-900">Perfil</h2>
             <p className="text-sm text-slate-600">Completá los datos de tu cuenta.</p>
           </div>
 
@@ -200,7 +250,7 @@ export default function Perfil() {
               className={`mb-4 rounded-xl px-4 py-2 text-sm ring-1 ${
                 /error|cerró|incorrect|no se pudo|404|401|422|400/i.test(msg)
                   ? "bg-red-50 text-red-700 ring-red-200"
-                  : "bg-emerald-50 text-emerald-700 ring-emerald-200"
+                  : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
               }`}
             >
               {msg}
@@ -246,7 +296,7 @@ export default function Perfil() {
                   </button>
                 </div>
 
-                <p className="text-[11px] text-slate-500">La foto se guarda localmente por ahora.</p>
+                <p className="text-[11px] text-slate-500">La foto se guarda en el servidor si tu backend lo admite.</p>
 
                 {!!avatarMsg && (
                   <p className="text-xs text-slate-700">{avatarMsg}</p>
@@ -313,92 +363,88 @@ export default function Perfil() {
         </div>
       </div>
 
-      {/* ===== Bloque: Seguridad ===== */}
+      {/* ===== Bloque: Seguridad (acordeón) ===== */}
       <div className={WRAP}>
         <div className={CARD}>
-          <div className="mb-4">
-            <h2 className="text-xl font-bold text-slate-900">Seguridad</h2>
-            <p className="text-sm text-slate-600">Actualizá tu contraseña.</p>
-          </div>
+          <button
+            type="button"
+            onClick={() => setSecOpen(v => !v)}
+            className="w-full flex items-center justify-between gap-3"
+          >
+            <div>
+              <h2 className="text-xl font-bold text-slate-900">Seguridad</h2>
+              <p className="text-sm text-slate-600">Actualizá tu contraseña.</p>
+            </div>
+            <span className="text-slate-500 text-xl">{secOpen ? "–" : "+"}</span>
+          </button>
 
-          {secMsg && (
-            <div
-              className={`mb-4 rounded-xl px-4 py-2 text-sm ring-1 ${
-                /coincide|cerró|error|no se pudo|404|401|422|400/i.test(secMsg)
-                  ? "bg-red-50 text-red-700 ring-red-200"
-                  : "bg-emerald-50 text-emerald-700 ring-emerald-200"
-              }`}
-            >
-              {secMsg}
+          {secOpen && (
+            <div className="mt-4">
+              {secMsg && (
+                <div
+                  className={`mb-4 rounded-xl px-4 py-2 text-sm ring-1 ${
+                    /coincide|cerró|error|no se pudo|404|401|422|400/i.test(secMsg)
+                      ? "bg-red-50 text-red-700 ring-red-200"
+                      : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                  }`}
+                >
+                  {secMsg}
+                </div>
+              )}
+
+              <form onSubmit={savePassword} className="grid gap-4">
+                <div>
+                  <label className={LABEL}>Contraseña actual</label>
+                  <Input
+                    type="password"
+                    name="actual"
+                    autoComplete="current-password"
+                    value={secForm.actual}
+                    onChange={e => setSecForm(p => ({ ...p, actual: e.target.value }))}
+                    className={BOX}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className={LABEL}>Nueva contraseña</label>
+                  <Input
+                    type="password"
+                    name="nueva"
+                    autoComplete="new-password"
+                    value={secForm.nueva}
+                    onChange={e => setSecForm(p => ({ ...p, nueva: e.target.value }))}
+                    className={BOX}
+                    required
+                  />
+                </div>
+                <div>
+                  <label className={LABEL}>Confirmar contraseña</label>
+                  <Input
+                    type="password"
+                    name="confirmar"
+                    autoComplete="new-password"
+                    value={secForm.confirmar}
+                    onChange={e => setSecForm(p => ({ ...p, confirmar: e.target.value }))}
+                    className={BOX}
+                    required
+                  />
+                </div>
+
+                <ul className="text-xs text-slate-600 space-y-1">
+                  <li>• Al menos 8 caracteres.</li>
+                  <li>• Recomendado combinar letras, números y símbolos.</li>
+                </ul>
+
+                <div>
+                  <Button type="submit" disabled={secSaving} className={BTN}>
+                    {secSaving ? "Guardando…" : "Actualizar contraseña"}
+                  </Button>
+                </div>
+              </form>
             </div>
           )}
-
-          <form onSubmit={savePassword} className="grid gap-4">
-            <div>
-              <label className={LABEL}>Contraseña actual</label>
-              <Input
-                type="password"
-                name="actual"
-                autoComplete="current-password"
-                value={secForm.actual}
-                onChange={e => setSecForm(p => ({ ...p, actual: e.target.value }))}
-                className={BOX}
-                required
-              />
-            </div>
-            <div>
-              <label className={LABEL}>Nueva contraseña</label>
-              <Input
-                type="password"
-                name="nueva"
-                autoComplete="new-password"
-                value={secForm.nueva}
-                onChange={e => setSecForm(p => ({ ...p, nueva: e.target.value }))}
-                className={BOX}
-                required
-              />
-            </div>
-            <div>
-              <label className={LABEL}>Confirmar contraseña</label>
-              <Input
-                type="password"
-                name="confirmar"
-                autoComplete="new-password"
-                value={secForm.confirmar}
-                onChange={e => setSecForm(p => ({ ...p, confirmar: e.target.value }))}
-                className={BOX}
-                required
-              />
-            </div>
-
-            <ul className="text-xs text-slate-600 space-y-1">
-              <li>• Al menos 8 caracteres.</li>
-              <li>• Recomendado combinar letras, números y símbolos.</li>
-            </ul>
-
-            <div>
-              <Button type="submit" disabled={secSaving} className={BTN}>
-                {secSaving ? "Guardando…" : "Actualizar contraseña"}
-              </Button>
-            </div>
-          </form>
         </div>
       </div>
-
-      {/* Overlay */}
-      {overlayBusy && (
-        <div className="fixed inset-0 z-[70] grid place-items-center bg-slate-900/50 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 p-6 text-center">
-            <div className="mx-auto mb-4 h-12 w-12 grid place-items-center rounded-full bg-slate-100">
-              <svg className="h-6 w-6 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" className="opacity-20" />
-                <path d="M21 12a 9 9 0 0 1-9 9" stroke="currentColor" strokeWidth="2" className="opacity-80" />
-              </svg>
-            </div>
-            <p className="text-sm text-slate-700">Procesando…</p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
